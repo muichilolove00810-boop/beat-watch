@@ -35,7 +35,8 @@ import java.util.Random;
 /** 원형 워치용 리듬게임 화면 전체 (메뉴 / 코드 입력 / 플레이 / 결과). */
 public class BeatView extends View {
 
-    private static final int S_MENU = 0, S_DETAIL = 1, S_CODE = 2, S_LOADING = 3, S_PLAY = 4, S_RESULT = 5, S_SYNC = 6;
+    private static final int S_MENU = 0, S_DETAIL = 1, S_CODE = 2, S_LOADING = 3, S_PLAY = 4, S_RESULT = 5, S_SYNC = 6,
+            S_REC = 7, S_EDIT = 8;
     private static final int R_PERFECT = 0, R_GREAT = 1, R_GOOD = 2, R_MISS = 3;
     // 판정 범위(초). 베젤 노트는 SPIN_MUL 배 더 넉넉하게.
     private static final double W_PERFECT = 0.075, W_GREAT = 0.135, W_GOOD = 0.200;
@@ -47,16 +48,47 @@ public class BeatView extends View {
     };
     private static final int C_CW = Color.rgb(255, 150, 40), C_CCW = Color.rgb(190, 90, 255), C_ANY = Color.rgb(120, 255, 140);
 
+    private interface Adj {
+        String value();
+
+        void adjust(int d);
+    }
+
     private static final class Item {
-        final String title, sub;
+        final String title;
+        String sub;
         final MapCode map;
-        final int action; // 0 맵, 1 랜덤, 2 코드, 3 싱크
+        final int action; // 0 맵, 1 랜덤, 2 코드, 3 싱크, 9 실행, 10 값 조절
+        Runnable act;
+        Adj adj;
 
         Item(String title, String sub, MapCode map, int action) {
             this.title = title;
             this.sub = sub;
             this.map = map;
             this.action = action;
+        }
+
+        Item(String title, String sub, Runnable act) {
+            this(title, sub, null, 9);
+            this.act = act;
+        }
+
+        Item(String title, Adj adj) {
+            this(title, null, null, 10);
+            this.adj = adj;
+        }
+    }
+
+    private static final class MenuState {
+        final ArrayList<Item> items;
+        final int sel;
+        final String title;
+
+        MenuState(ArrayList<Item> items, int sel, String title) {
+            this.items = items;
+            this.sel = sel;
+            this.title = title;
         }
     }
 
@@ -86,9 +118,30 @@ public class BeatView extends View {
     private boolean running;
 
     // 메뉴
-    private final ArrayList<Item> items = new ArrayList<>();
+    private ArrayList<Item> items = new ArrayList<>();
     private int menuSel;
     private float menuPos;
+    private String menuTitle = "BEAT WATCH";
+    private boolean menuEditing;
+    private final ArrayList<MenuState> menuStack = new ArrayList<>();
+    private String toast = "";
+    private float toastT;
+
+    // 내 맵
+    private List<CustomMap> customs;
+    private CustomMap curCustom;
+    private String songKey = "";
+
+    // 녹음
+    private double recDownT = -1, lastRecSpinT = -9;
+    private int recCount;
+    private String recLast = "";
+    private float recFlash;
+
+    // 노트 편집
+    private double edT = Song.LEAD_IN;
+    private AudioPlayer edPlayer;
+    private String edInfo = "";
 
     // 선택된 맵
     private MapCode cur;
@@ -147,7 +200,9 @@ public class BeatView extends View {
     }
 
     private void buildMenu() {
-        items.clear();
+        if (!menuStack.isEmpty()) return; // 하위 메뉴에 있을 때는 유지
+        items = new ArrayList<>();
+        menuTitle = "BEAT WATCH";
         addPreset("네온 러시", new MapCode(0, 124, 0, 1, 9, true, 11));
         addPreset("선셋 드라이브", new MapCode(2, 100, 0, 1, 6, true, 202));
         addPreset("픽셀 하트", new MapCode(5, 150, 1, 1, 0, false, 55));
@@ -156,6 +211,12 @@ public class BeatView extends View {
         addPreset("썬더 브레이크", new MapCode(4, 172, 2, 2, 4, true, 6006));
         addPreset("글리치 스톰", new MapCode(7, 150, 2, 2, 11, false, 707));
         addPreset("지옥의 문", new MapCode(6, 140, 3, 3, 5, true, 8080));
+        addPreset("레이저 하우스", new MapCode(0, 126, 1, 1, 4, false, 1212));
+        addPreset("밤의 고속도로", new MapCode(2, 108, 1, 2, 9, true, 2424));
+        addPreset("얼음 궁전", new MapCode(3, 140, 2, 2, 1, true, 3636));
+        addPreset("8비트 모험", new MapCode(5, 160, 2, 1, 7, false, 4848));
+        addPreset("폭풍 베이스", new MapCode(6, 144, 2, 2, 10, true, 5050));
+        items.add(new Item("내 맵", "직접 만들기 · 녹음 · 편집", this::openMyMaps));
         items.add(new Item("랜덤 맵", "새 음악 + 새 코드 만들기", null, 1));
         items.add(new Item("코드 입력", "폰/친구가 만든 맵 플레이", null, 2));
         items.add(new Item("싱크 조절", "현재 " + fmtMs(syncMs), null, 3));
@@ -188,13 +249,36 @@ public class BeatView extends View {
         running = false;
         if (screen == S_PLAY) {
             stopPlayer();
-            screen = S_DETAIL;
+            screen = curCustom != null ? S_MENU : S_DETAIL;
+        }
+        if (screen == S_REC) finishRec();
+        if (screen == S_EDIT) {
+            stopEdPlayer();
+            saveCustoms();
         }
     }
 
     /** 뒤로 가기. 처리했으면 true. */
     boolean back() {
         switch (screen) {
+            case S_MENU:
+                if (menuEditing) {
+                    menuEditing = false;
+                    return true;
+                }
+                if (!menuStack.isEmpty()) {
+                    popMenu();
+                    return true;
+                }
+                return false;
+            case S_REC:
+                finishRec();
+                return true;
+            case S_EDIT:
+                stopEdPlayer();
+                saveCustoms();
+                screen = S_MENU;
+                return true;
             case S_DETAIL:
             case S_CODE:
             case S_SYNC:
@@ -202,10 +286,10 @@ public class BeatView extends View {
                 return true;
             case S_PLAY:
                 stopPlayer();
-                screen = S_DETAIL;
+                screen = curCustom != null ? S_MENU : S_DETAIL;
                 return true;
             case S_RESULT:
-                screen = S_DETAIL;
+                screen = curCustom != null ? S_MENU : S_DETAIL;
                 return true;
             case S_LOADING:
                 return true;
@@ -227,6 +311,10 @@ public class BeatView extends View {
             inputSpin(delta > 0 ? 1 : -1, eventTime);
             return;
         }
+        if (screen == S_REC) {
+            if (delta != 0) recSpin(delta > 0 ? 1 : -1, eventTime);
+            return;
+        }
         if (now - lastRot > 300) rotAcc = 0;
         lastRot = now;
         rotAcc += delta;
@@ -235,8 +323,19 @@ public class BeatView extends View {
         rotAcc = 0;
         switch (screen) {
             case S_MENU:
-                menuSel = Math.max(0, Math.min(items.size() - 1, menuSel + dir));
+                if (menuEditing && items.get(menuSel).adj != null) {
+                    items.get(menuSel).adj.adjust(dir);
+                } else {
+                    menuSel = Math.max(0, Math.min(items.size() - 1, menuSel + dir));
+                }
                 tick();
+                break;
+            case S_EDIT:
+                if (edPlayer == null) {
+                    double g = curCustom.beat() / 4;
+                    edT = Math.max(0, Song.LEAD_IN + Math.round((edT - Song.LEAD_IN) / g + dir) * g);
+                    updateEdInfo();
+                }
                 break;
             case S_CODE:
                 codeIdx[codeSlot] = Math.floorMod(codeIdx[codeSlot] + dir, 32);
@@ -263,12 +362,13 @@ public class BeatView extends View {
                 scrolled = false;
                 touching = true;
                 if (screen == S_PLAY) inputTap(e.getEventTime());
+                if (screen == S_REC) recDown(e.getEventTime());
                 return true;
             case MotionEvent.ACTION_POINTER_DOWN:
                 if (screen == S_PLAY) inputTap(e.getEventTime());
                 return true;
             case MotionEvent.ACTION_MOVE: {
-                if (screen == S_PLAY || swiped) return true;
+                if (screen == S_PLAY || screen == S_REC || swiped) return true;
                 float dx = e.getX() - downX, dy = e.getY() - downY;
                 if (!scrolled && Math.abs(dx) > W * 0.18f && Math.abs(dx) > Math.abs(dy) * 1.5f) {
                     swiped = true;
@@ -290,6 +390,10 @@ public class BeatView extends View {
                 return true;
             case MotionEvent.ACTION_UP: {
                 touching = false;
+                if (screen == S_REC) {
+                    recUp(e.getEventTime());
+                    return true;
+                }
                 if (screen == S_PLAY || swiped || scrolled) return true;
                 float dx = e.getX() - downX, dy = e.getY() - downY;
                 if (Math.abs(dx) < W * 0.08f && Math.abs(dy) < W * 0.08f) {
@@ -313,6 +417,18 @@ public class BeatView extends View {
                     return;
                 }
                 Item it = items.get(menuSel);
+                if (it.action == 10) {
+                    menuEditing = !menuEditing;
+                    return;
+                }
+                if (menuEditing) {
+                    menuEditing = false;
+                    return;
+                }
+                if (it.action == 9) {
+                    if (it.act != null) it.act.run();
+                    return;
+                }
                 if (it.action == 0) {
                     openMap(it.map, it.title);
                 } else if (it.action == 1) {
@@ -329,6 +445,9 @@ public class BeatView extends View {
             }
             case S_DETAIL:
                 startLoading();
+                break;
+            case S_EDIT:
+                edTap(x, y, longPress);
                 break;
             case S_CODE:
                 if (codeSlot < 8) {
@@ -370,6 +489,7 @@ public class BeatView extends View {
     }
 
     private void openMap(MapCode m, String title) {
+        curCustom = null;
         if (cur == null || !cur.code().equals(m.code())) song = null;
         cur = m;
         curTitle = title;
@@ -379,10 +499,19 @@ public class BeatView extends View {
     // =================== 로딩 / 플레이 ===================
 
     private void startLoading() {
-        if (song != null && song.map.code().equals(cur.code())) {
+        if (curCustom != null) {
+            final CustomMap cm = curCustom;
+            loadCustomSong(cm, () -> {
+                song = song.withNotes(cm.toNotes());
+                startPlay();
+            });
+            return;
+        }
+        if (song != null && song.map.code().equals(cur.code()) && songKey.equals(cur.code())) {
             startPlay();
             return;
         }
+        songKey = "";
         screen = S_LOADING;
         loading = true;
         final MapCode m = cur;
@@ -392,9 +521,399 @@ public class BeatView extends View {
                 loading = false;
                 if (screen != S_LOADING || cur != m) return;
                 song = s;
+                songKey = m.code();
                 startPlay();
             });
         }, "song-gen").start();
+    }
+
+    /** 내 맵의 음악(레이어 포함)을 만들고 then 실행. 같은 음악이면 재사용. */
+    private void loadCustomSong(final CustomMap cm, final Runnable then) {
+        final MapCode m = cm.code();
+        cur = m;
+        final String key = m.code() + "/" + cm.layers;
+        if (song != null && key.equals(songKey)) {
+            then.run();
+            return;
+        }
+        screen = S_LOADING;
+        loading = true;
+        new Thread(() -> {
+            Song s = Song.generate(m, cm.layers);
+            main.post(() -> {
+                loading = false;
+                if (screen != S_LOADING) return;
+                song = s;
+                songKey = key;
+                then.run();
+            });
+        }, "song-gen").start();
+    }
+
+    // =================== 내 맵 메뉴 ===================
+
+    private void pushMenu(String title, ArrayList<Item> its) {
+        menuStack.add(new MenuState(items, menuSel, menuTitle));
+        items = its;
+        menuTitle = title;
+        menuSel = 0;
+        menuPos = 0;
+        menuEditing = false;
+        screen = S_MENU;
+    }
+
+    private void popMenu() {
+        MenuState st = menuStack.remove(menuStack.size() - 1);
+        items = st.items;
+        menuSel = Math.min(st.sel, items.size() - 1);
+        menuPos = menuSel;
+        menuTitle = st.title;
+        menuEditing = false;
+        screen = S_MENU;
+    }
+
+    private void replaceMenu(String title, ArrayList<Item> its) {
+        int sel = menuSel;
+        items = its;
+        menuTitle = title;
+        menuSel = Math.min(sel, its.size() - 1);
+        screen = S_MENU;
+    }
+
+    private void showToast(String t) {
+        toast = t;
+        toastT = 2.5f;
+    }
+
+    private List<CustomMap> customs() {
+        if (customs == null) customs = CustomMap.loadAll(prefs);
+        return customs;
+    }
+
+    private void saveCustoms() {
+        if (customs != null) CustomMap.saveAll(prefs, customs);
+    }
+
+    private ArrayList<Item> myMapsItems() {
+        ArrayList<Item> its = new ArrayList<>();
+        its.add(new Item("+ 새 맵", "자동 채보로 시작해서 고치기", () -> newCustom(true)));
+        its.add(new Item("+ 빈 맵", "음악만 · 직접 녹음해서 만들기", () -> newCustom(false)));
+        for (CustomMap cm : customs()) {
+            final CustomMap c = cm;
+            its.add(new Item(cm.name, MapCode.STYLES[cm.style] + " · " + cm.bpm + " · 노트 " + cm.notes.size(), () -> openCustom(c)));
+        }
+        return its;
+    }
+
+    private void openMyMaps() {
+        pushMenu("내 맵", myMapsItems());
+    }
+
+    private void newCustom(boolean autoChart) {
+        final CustomMap cm = new CustomMap();
+        cm.id = "c" + System.currentTimeMillis();
+        cm.name = "내 맵 " + (customs().size() + 1);
+        cm.setFrom(MapCode.random(new Random(), 1));
+        customs().add(cm);
+        if (autoChart) {
+            loadCustomSong(cm, () -> {
+                cm.setFromNotes(song.notes);
+                saveCustoms();
+                replaceMenu("내 맵", myMapsItems());
+                openCustom(cm);
+            });
+        } else {
+            saveCustoms();
+            replaceMenu("내 맵", myMapsItems());
+            openCustom(cm);
+        }
+    }
+
+    private ArrayList<Item> customItems(final CustomMap cm) {
+        ArrayList<Item> its = new ArrayList<>();
+        its.add(new Item("플레이", "노트 " + cm.notes.size() + "개", () -> {
+            if (cm.notes.isEmpty()) {
+                showToast("노트가 없어요. 녹음이나 편집을 먼저!");
+                return;
+            }
+            curCustom = cm;
+            curTitle = cm.name;
+            startLoading();
+        }));
+        its.add(new Item("녹음 (새로)", "음악 들으며 탭·누르기·베젤", () -> startRec(cm, false)));
+        its.add(new Item("녹음 (덧입히기)", "기존 노트 위에 더 찍기", () -> startRec(cm, true)));
+        its.add(new Item("노트 편집", "베젤로 이동하며 하나씩", () -> startEdit(cm)));
+        its.add(new Item("곡 설정", "장르 · BPM · 키 · 악기", () -> openCustomSettings(cm)));
+        its.add(new Item("자동 채보로 채우기", "지금 음악에 맞춰 다시 만들기", () -> {
+            final MapCode m = cm.code();
+            screen = S_LOADING;
+            loading = true;
+            new Thread(() -> {
+                Song s = Song.generate(m, cm.layers);
+                main.post(() -> {
+                    loading = false;
+                    cm.setFromNotes(s.notes);
+                    saveCustoms();
+                    replaceMenu(cm.name, customItems(cm));
+                    showToast("노트 " + cm.notes.size() + "개 생성");
+                });
+            }, "song-gen").start();
+        }));
+        its.add(new Item("복제", "같은 맵 하나 더", () -> {
+            CustomMap c = new CustomMap();
+            c.id = "c" + System.currentTimeMillis();
+            c.name = cm.name + " 복사";
+            c.setFrom(cm.code());
+            c.layers = cm.layers;
+            c.quant = cm.quant;
+            for (double[] n : cm.notes) c.notes.add(n.clone());
+            customs().add(c);
+            saveCustoms();
+            popMenu();
+            replaceMenu("내 맵", myMapsItems());
+            showToast("복제했어요");
+        }));
+        its.add(new Item("삭제", "탭하면 바로 삭제", () -> {
+            customs().remove(cm);
+            saveCustoms();
+            popMenu();
+            replaceMenu("내 맵", myMapsItems());
+            showToast("삭제했어요");
+        }));
+        return its;
+    }
+
+    private void openCustom(CustomMap cm) {
+        curCustom = cm;
+        pushMenu(cm.name, customItems(cm));
+    }
+
+    private void openCustomSettings(final CustomMap cm) {
+        ArrayList<Item> its = new ArrayList<>();
+        its.add(new Item("장르", new Adj() {
+            public String value() { return MapCode.STYLES[cm.style]; }
+            public void adjust(int d) { cm.style = Math.floorMod(cm.style + d, 8); cm.bpm = MapCode.STYLE_BPM[cm.style]; saveCustoms(); }
+        }));
+        its.add(new Item("BPM", new Adj() {
+            public String value() { return String.valueOf(cm.bpm); }
+            public void adjust(int d) { cm.bpm = Math.max(MapCode.BPM_MIN, Math.min(MapCode.BPM_MAX, cm.bpm + d * 2)); saveCustoms(); }
+        }));
+        its.add(new Item("키", new Adj() {
+            public String value() { return MapCode.KEYS[cm.key] + (cm.minor ? " 단조" : " 장조"); }
+            public void adjust(int d) { cm.key = Math.floorMod(cm.key + d, 12); saveCustoms(); }
+        }));
+        its.add(new Item("장조/단조", new Adj() {
+            public String value() { return cm.minor ? "단조 (어두움)" : "장조 (밝음)"; }
+            public void adjust(int d) { cm.minor = !cm.minor; saveCustoms(); }
+        }));
+        its.add(new Item("멜로디 번호", new Adj() {
+            public String value() { return String.valueOf(cm.seed); }
+            public void adjust(int d) { cm.seed = Math.max(0, Math.min(0x3FFFFF, cm.seed + d)); saveCustoms(); }
+        }));
+        its.add(new Item("길이", new Adj() {
+            public String value() { return MapCode.BARS[cm.len] + "마디 · " + cm.code().lengthText(); }
+            public void adjust(int d) { cm.len = Math.max(0, Math.min(3, cm.len + d)); saveCustoms(); }
+        }));
+        its.add(new Item("노트 속도", new Adj() {
+            public String value() { return new String[]{"느림", "보통", "빠름", "아주 빠름"}[cm.diff]; }
+            public void adjust(int d) { cm.diff = Math.max(0, Math.min(3, cm.diff + d)); saveCustoms(); }
+        }));
+        its.add(new Item("녹음 박자 맞춤", new Adj() {
+            public String value() { return new String[]{"끄기 (자유)", "8분음표", "16분음표"}[cm.quant]; }
+            public void adjust(int d) { cm.quant = Math.floorMod(cm.quant + d, 3); saveCustoms(); }
+        }));
+        for (int i = 0; i < Song.LAYER_NAMES.length; i++) {
+            final int bit = 1 << i;
+            its.add(new Item("악기: " + Song.LAYER_NAMES[i], new Adj() {
+                public String value() { return (cm.layers & bit) != 0 ? "켜기" : "끄기"; }
+                public void adjust(int d) { cm.layers ^= bit; saveCustoms(); }
+            }));
+        }
+        its.add(new Item("미리 듣기", "바꾼 음악을 노트 편집에서 들어봐요", () -> startEdit(cm)));
+        pushMenu("곡 설정", its);
+    }
+
+    // =================== 녹음 ===================
+
+    private void startRec(final CustomMap cm, final boolean overdub) {
+        curCustom = cm;
+        loadCustomSong(cm, () -> {
+            if (!overdub) cm.notes.clear();
+            recCount = 0;
+            recDownT = -1;
+            lastRecSpinT = -9;
+            recLast = "";
+            stopPlayer();
+            player = new AudioPlayer(song.pcm);
+            player.start();
+            screen = S_REC;
+        });
+    }
+
+    private void recAdd(double t, double end, int type, int dir) {
+        CustomMap cm = curCustom;
+        double st = cm.snap(t);
+        // 같은 자리 노트는 교체
+        for (int i = cm.notes.size() - 1; i >= 0; i--) {
+            if (Math.abs(cm.notes.get(i)[0] - st) < 0.04) cm.notes.remove(i);
+        }
+        double en = type == Note.HOLD ? Math.max(st + cm.beat() / 2, cm.snap(end)) : st;
+        cm.notes.add(new double[]{st, en, type, dir});
+        recCount++;
+        recFlash = 1f;
+        recLast = type == Note.HOLD ? "줄" : type == Note.SPIN ? (dir > 0 ? "베젤 ↻" : "베젤 ↺") : "탭";
+    }
+
+    private void recDown(long et) {
+        if (player == null) return;
+        recDownT = songTimeAt(et);
+    }
+
+    private void recUp(long et) {
+        if (player == null || recDownT < 0) return;
+        double t = songTimeAt(et);
+        double dur = t - recDownT;
+        if (dur >= 0.3) recAdd(recDownT, t, Note.HOLD, 0);
+        else recAdd(recDownT, recDownT, Note.TAP, 0);
+        recDownT = -1;
+    }
+
+    private void recSpin(int dir, long et) {
+        if (player == null) return;
+        double t = songTimeAt(et);
+        if (t - lastRecSpinT < 0.3) return; // 연속 회전은 한 번으로
+        lastRecSpinT = t;
+        recAdd(t, t, Note.SPIN, dir);
+    }
+
+    private void finishRec() {
+        stopPlayer();
+        saveCustoms();
+        if (curCustom != null) replaceMenu(curCustom.name, customItems(curCustom));
+        showToast("노트 " + recCount + "개 녹음 · 총 " + (curCustom != null ? curCustom.notes.size() : 0) + "개");
+        screen = S_MENU;
+    }
+
+    // =================== 노트 편집 ===================
+
+    private void startEdit(final CustomMap cm) {
+        curCustom = cm;
+        loadCustomSong(cm, () -> {
+            edT = Song.LEAD_IN;
+            screen = S_EDIT;
+            updateEdInfo();
+        });
+    }
+
+    private void stopEdPlayer() {
+        if (edPlayer != null) {
+            edPlayer.release();
+            edPlayer = null;
+        }
+    }
+
+    private double[] noteAtEd() {
+        double g = curCustom.beat() / 4;
+        double[] best = null;
+        double bd = g / 2;
+        for (double[] n : curCustom.notes) {
+            double d = Math.abs(n[0] - edT);
+            if (d <= bd) {
+                bd = d;
+                best = n;
+            }
+        }
+        return best;
+    }
+
+    private static String typeName(double[] n) {
+        int type = (int) n[2], dir = (int) n[3];
+        if (type == Note.HOLD) return "줄";
+        if (type == Note.SPIN) return dir > 0 ? "베젤 시계" : dir < 0 ? "베젤 반시계" : "베젤 아무쪽";
+        return "탭";
+    }
+
+    private void updateEdInfo() {
+        double[] n = noteAtEd();
+        edInfo = n == null ? "빈 칸 · 탭: 노트 추가" : typeName(n) + " · 탭: 종류 바꾸기";
+    }
+
+    private void edTap(float x, float y, boolean longPress) {
+        CustomMap cm = curCustom;
+        if (y < H * 0.24f && Math.abs(x - cx) < W * 0.22f) {
+            if (edPlayer != null) {
+                stopEdPlayer();
+            } else {
+                edPlayer = new AudioPlayer(song.pcm);
+                edPlayer.start(Math.max(0, edT - 1.0));
+            }
+            return;
+        }
+        if (edPlayer != null) {
+            stopEdPlayer();
+            double g = cm.beat() / 4;
+            edT = Song.LEAD_IN + Math.round((edT - Song.LEAD_IN) / g) * g;
+            updateEdInfo();
+            return;
+        }
+        if (x < W * 0.2f || x > W * 0.8f) {
+            // 이전/다음 노트로 이동
+            boolean next = x > cx;
+            double bestT = next ? Double.MAX_VALUE : -1;
+            for (double[] n : cm.notes) {
+                if (next && n[0] > edT + 0.01 && n[0] < bestT) bestT = n[0];
+                if (!next && n[0] < edT - 0.01 && n[0] > bestT) bestT = n[0];
+            }
+            if (bestT >= 0 && bestT < Double.MAX_VALUE) edT = bestT;
+            updateEdInfo();
+            return;
+        }
+        double[] n = noteAtEd();
+        if (y > H * 0.78f) {
+            // 줄 길이 바꾸기
+            if (n != null && (int) n[2] == Note.HOLD) {
+                double[] lens = {0.5, 1, 2, 3, 4};
+                double curLen = (n[1] - n[0]) / cm.beat();
+                int k = 0;
+                while (k < lens.length && lens[k] <= curLen + 0.01) k++;
+                n[1] = n[0] + lens[k % lens.length] * cm.beat();
+                edInfo = "줄 길이 " + lens[k % lens.length] + "박";
+                saveCustoms();
+            }
+            return;
+        }
+        if (longPress) {
+            if (n != null) {
+                cm.notes.remove(n);
+                buzz(30);
+                saveCustoms();
+            }
+            updateEdInfo();
+            return;
+        }
+        if (n == null) {
+            cm.notes.add(new double[]{edT, edT, Note.TAP, 0});
+        } else {
+            int type = (int) n[2], dir = (int) n[3];
+            if (type == Note.TAP) {
+                n[2] = Note.HOLD;
+                n[1] = n[0] + cm.beat();
+            } else if (type == Note.HOLD) {
+                n[2] = Note.SPIN;
+                n[3] = 0;
+                n[1] = n[0];
+            } else if (dir == 0) {
+                n[3] = 1;
+            } else if (dir == 1) {
+                n[3] = -1;
+            } else {
+                n[2] = Note.TAP;
+                n[3] = 0;
+            }
+        }
+        tick();
+        saveCustoms();
+        updateEdInfo();
     }
 
     private void startPlay() {
@@ -559,7 +1078,7 @@ public class BeatView extends View {
         }
         activeHold = null;
         float acc = accuracy();
-        String key = "best_" + cur.code();
+        String key = curCustom != null ? "best_c_" + curCustom.id : "best_" + cur.code();
         float prev = prefs.getFloat(key, -1);
         newBest = !failed && acc > prev;
         if (newBest) prefs.edit().putFloat(key, acc).apply();
@@ -634,6 +1153,8 @@ public class BeatView extends View {
         judgeT = Math.max(0, judgeT - dt);
         ringFlash = Math.max(0, ringFlash - dt * 4);
         resultT += dt;
+        toastT = Math.max(0, toastT - dt);
+        recFlash = Math.max(0, recFlash - dt * 3);
         for (Iterator<Fx> it = fx.iterator(); it.hasNext(); ) {
             Fx f = it.next();
             f.life -= dt;
@@ -653,6 +1174,8 @@ public class BeatView extends View {
             case S_PLAY: updatePlay(); if (screen == S_PLAY) drawPlay(c); else invalidate(); break;
             case S_RESULT: drawResult(c); break;
             case S_SYNC: drawSync(c); break;
+            case S_REC: updateRec(); if (screen == S_REC) drawRec(c); break;
+            case S_EDIT: drawEdit(c); break;
         }
         if (running) postInvalidateOnAnimation();
     }
@@ -705,7 +1228,8 @@ public class BeatView extends View {
             c.drawText(it.title, cx, y - W * 0.005f, text);
             text.setTextSize(W * 0.04f);
             text.setColor(alpha(ic, (int) (70 + 160 * k)));
-            String sub = it.sub;
+            String sub = it.adj != null ? (menuEditing && i == menuSel ? "◀ " + it.adj.value() + " ▶" : it.adj.value()) : it.sub;
+            if (sub == null) sub = "";
             if (it.map != null) {
                 float b = prefs.getFloat("best_" + it.map.code(), -1);
                 if (b >= 0) sub = sub + "  " + rank(b, false);
@@ -717,7 +1241,20 @@ public class BeatView extends View {
         c.drawRect(0, 0, W, H * 0.13f, p);
         text.setTextSize(W * 0.05f);
         text.setColor(Color.rgb(0, 229, 255));
-        c.drawText("BEAT WATCH", cx, H * 0.1f, text);
+        c.drawText(menuTitle, cx, H * 0.1f, text);
+        if (toastT > 0) {
+            p.setColor(Color.argb((int) (200 * Math.min(1f, toastT)), 0, 0, 0));
+            text.setTextSize(W * 0.04f);
+            float tw = text.measureText(toast) / 2 + W * 0.04f;
+            r.set(cx - tw, H * 0.8f, cx + tw, H * 0.88f);
+            c.drawRoundRect(r, W * 0.04f, W * 0.04f, p);
+            text.setColor(Color.argb((int) (255 * Math.min(1f, toastT)), 255, 230, 120));
+            c.drawText(toast, cx, H * 0.855f, text);
+        } else if (menuEditing) {
+            text.setTextSize(W * 0.038f);
+            text.setColor(Color.LTGRAY);
+            c.drawText("베젤로 조절 · 탭하면 완료", cx, H * 0.93f, text);
+        }
         String st = updater != null ? updater.status() : "";
         if (!st.isEmpty()) {
             p.setColor(Color.rgb(8, 6, 16));
@@ -1067,6 +1604,152 @@ public class BeatView extends View {
         long h = i * 374761393L + b * 668265263L;
         h = (h ^ (h >>> 13)) * 1274126177L;
         return ((h >>> 8) & 0xFFFF) / 65535f;
+    }
+
+    // ---------- 녹음 ----------
+
+    private void updateRec() {
+        if (player == null) return;
+        playT = songTime();
+        if (playT > song.musicEnd() + 0.6) finishRec();
+    }
+
+    private void drawRec(Canvas c) {
+        double t = playT;
+        int col = STYLE_COLOR[cur.style];
+        double beats = (t - Song.LEAD_IN) / song.beatSec;
+        float frac = beats >= 0 ? (float) (beats - Math.floor(beats)) : 0.5f;
+        float pulse = (float) Math.exp(-frac * 5) * song.energyAt(t);
+        glow(c, cx, cy, W * (0.3f + 0.2f * pulse), alpha(col, (int) (40 + 120 * pulse)));
+        stroke.setStrokeWidth(W * (0.012f + 0.02f * recFlash));
+        stroke.setColor(alpha(Color.WHITE, 150 + (int) (100 * recFlash)));
+        c.drawCircle(cx, cy, R, stroke);
+        // 최근 노트 (시계 방향으로 흘러감)
+        for (double[] n : curCustom.notes) {
+            double dt = n[0] - t;
+            if (dt < -2 || dt > 0.3) continue;
+            double a = Math.toRadians(-90 + dt * 90);
+            float x = cx + (float) Math.cos(a) * R, y = cy + (float) Math.sin(a) * R;
+            int nc = (int) n[2] == Note.SPIN ? spinColor((int) n[3]) : col;
+            p.setColor(alpha(nc, (int) (255 * Math.max(0.2, 1 + dt / 2))));
+            c.drawCircle(x, y, W * 0.025f, p);
+        }
+        boolean blink = (SystemClock.uptimeMillis() / 400) % 2 == 0;
+        p.setColor(blink ? Color.rgb(255, 60, 70) : Color.rgb(120, 20, 30));
+        c.drawCircle(cx - W * 0.1f, H * 0.2f, W * 0.022f, p);
+        text.setTextSize(W * 0.05f);
+        text.setColor(Color.WHITE);
+        c.drawText("REC", cx + W * 0.03f, H * 0.215f, text);
+        text.setTextSize(W * 0.13f);
+        c.drawText(String.valueOf(recCount), cx, cy + W * 0.03f, text);
+        if (recFlash > 0) {
+            text.setTextSize(W * 0.055f);
+            text.setColor(alpha(col, (int) (255 * recFlash)));
+            c.drawText(recLast, cx, cy + W * 0.12f, text);
+        }
+        text.setTextSize(W * 0.038f);
+        text.setColor(Color.LTGRAY);
+        c.drawText("탭 · 길게 누르기 · 베젤", cx, H * 0.72f, text);
+        c.drawText("뒤로: 저장하고 끝내기", cx, H * 0.78f, text);
+        float ro = W * 0.485f;
+        r.set(cx - ro, cy - ro, cx + ro, cy + ro);
+        stroke.setStrokeWidth(W * 0.014f);
+        stroke.setColor(Color.argb(60, 255, 255, 255));
+        c.drawArc(r, 230, 80, false, stroke);
+        stroke.setColor(Color.rgb(255, 60, 70));
+        float prog = (float) Math.max(0, Math.min(1, t / song.musicEnd()));
+        c.drawArc(r, 230, 80 * prog, false, stroke);
+        if (t < Song.LEAD_IN) {
+            text.setTextSize(W * 0.05f);
+            text.setColor(Color.rgb(255, 230, 120));
+            c.drawText("곧 시작!", cx, H * 0.88f, text);
+        }
+    }
+
+    // ---------- 노트 편집 ----------
+
+    private void drawEdit(Canvas c) {
+        CustomMap cm = curCustom;
+        int col = STYLE_COLOR[cm.style];
+        if (edPlayer != null) edT = edPlayer.time() - syncMs / 1000.0;
+        double beat = cm.beat();
+        float pps = W / 2.4f;
+        float laneY = cy;
+        glow(c, cx, cy, W * 0.5f, alpha(col, 40));
+        // 박자 격자
+        double g = beat / 4;
+        long k0 = (long) Math.floor((edT - 1.4 - Song.LEAD_IN) / g);
+        for (long k = k0; ; k++) {
+            double tt = Song.LEAD_IN + k * g;
+            float x = cx + (float) ((tt - edT) * pps);
+            if (x > W + 5) break;
+            if (x < -5 || k < 0) continue;
+            boolean barLine = k % 16 == 0, beatLine = k % 4 == 0;
+            stroke.setStrokeWidth(barLine ? 3 : 1.5f);
+            stroke.setColor(barLine ? Color.argb(160, 255, 255, 255) : beatLine ? Color.argb(90, 255, 255, 255) : Color.argb(35, 255, 255, 255));
+            c.drawLine(x, laneY - H * 0.16f, x, laneY + H * 0.16f, stroke);
+            if (barLine) {
+                text.setTextSize(W * 0.03f);
+                text.setColor(Color.GRAY);
+                c.drawText(String.valueOf(k / 16 + 1), x, laneY - H * 0.18f, text);
+            }
+        }
+        // 노트
+        for (double[] n : cm.notes) {
+            float x = cx + (float) ((n[0] - edT) * pps);
+            float xe = cx + (float) ((n[1] - edT) * pps);
+            if (xe < -30 || x > W + 30) continue;
+            int type = (int) n[2], dir = (int) n[3];
+            if (type == Note.HOLD) {
+                stroke.setStrokeWidth(W * 0.05f);
+                stroke.setColor(alpha(col, 200));
+                c.drawLine(x, laneY, xe, laneY, stroke);
+                p.setColor(Color.WHITE);
+                c.drawCircle(x, laneY, W * 0.03f, p);
+            } else if (type == Note.SPIN) {
+                stroke.setStrokeWidth(W * 0.014f);
+                stroke.setColor(spinColor(dir));
+                c.drawCircle(x, laneY - H * 0.09f, W * 0.035f, stroke);
+                text.setTextSize(W * 0.04f);
+                text.setColor(spinColor(dir));
+                c.drawText(dir > 0 ? "↻" : dir < 0 ? "↺" : "○", x, laneY - H * 0.075f, text);
+            } else {
+                p.setColor(col);
+                c.drawCircle(x, laneY, W * 0.03f, p);
+                p.setColor(Color.WHITE);
+                c.drawCircle(x, laneY, W * 0.014f, p);
+            }
+        }
+        // 재생 위치
+        stroke.setStrokeWidth(W * 0.008f);
+        stroke.setColor(Color.rgb(255, 230, 120));
+        c.drawLine(cx, laneY - H * 0.2f, cx, laneY + H * 0.2f, stroke);
+        // 버튼 / 안내
+        p.setColor(Color.argb(180, 20, 20, 30));
+        c.drawCircle(cx, H * 0.13f, W * 0.075f, p);
+        text.setTextSize(W * 0.06f);
+        text.setColor(edPlayer != null ? Color.rgb(255, 90, 100) : Color.rgb(120, 255, 140));
+        c.drawText(edPlayer != null ? "■" : "▶", cx, H * 0.15f, text);
+        text.setTextSize(W * 0.07f);
+        text.setColor(Color.argb(170, 255, 255, 255));
+        c.drawText("◀", W * 0.08f, cy + W * 0.025f, text);
+        c.drawText("▶", W * 0.92f, cy + W * 0.025f, text);
+        int sec = (int) Math.max(0, edT - Song.LEAD_IN);
+        int bar = (int) Math.max(0, Math.floor((edT - Song.LEAD_IN) / (beat * 4))) + 1;
+        text.setTextSize(W * 0.04f);
+        text.setColor(Color.WHITE);
+        c.drawText(sec / 60 + ":" + String.format("%02d", sec % 60) + " · " + bar + "마디 · 노트 " + cm.notes.size(), cx, H * 0.27f, text);
+        text.setTextSize(W * 0.042f);
+        text.setColor(Color.rgb(255, 230, 120));
+        c.drawText(edPlayer != null ? "재생 중 · 탭하면 멈춤" : edInfo, cx, H * 0.75f, text);
+        text.setTextSize(W * 0.034f);
+        text.setColor(Color.GRAY);
+        c.drawText("베젤: 이동 · 길게: 삭제", cx, H * 0.81f, text);
+        double[] n = noteAtEd();
+        if (n != null && (int) n[2] == Note.HOLD) {
+            text.setColor(Color.rgb(120, 220, 255));
+            c.drawText("아래 탭: 줄 길이", cx, H * 0.87f, text);
+        }
     }
 
     // ---------- 결과 ----------

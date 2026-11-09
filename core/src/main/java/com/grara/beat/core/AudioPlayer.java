@@ -37,10 +37,19 @@ public final class AudioPlayer {
                 .build();
     }
 
+    private double offset;
+
     public void start() {
-        int pre = Math.min(pcm.length, track.getBufferSizeInFrames());
-        int w = track.write(pcm, 0, pre);
-        pos = Math.max(0, w);
+        start(0);
+    }
+
+    /** offsetSec 지점부터 재생. time() 은 곡 전체 기준 시간을 돌려준다. */
+    public void start(double offsetSec) {
+        int from = Math.max(0, Math.min(pcm.length - 1, (int) (offsetSec * Song.SR)));
+        offset = from / (double) Song.SR;
+        int pre = Math.min(pcm.length - from, track.getBufferSizeInFrames());
+        int w = track.write(pcm, from, pre);
+        pos = from + Math.max(0, w);
         track.play();
         startNanos = System.nanoTime();
         writer = new Thread(() -> {
@@ -73,7 +82,7 @@ public final class AudioPlayer {
         }
         if (t < lastT && lastT - t < 0.03) t = lastT; // 작은 역행 방지
         lastT = t;
-        return t;
+        return t + offset;
     }
 
     public double length() {

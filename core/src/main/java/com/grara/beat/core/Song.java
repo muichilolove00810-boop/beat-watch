@@ -31,8 +31,21 @@ public final class Song {
         this.barEnergy = barEnergy;
     }
 
+    /** 악기 레이어 비트: 1 드럼, 2 베이스, 4 패드, 8 멜로디, 16 아르페지오 */
+    public static final int L_DRUMS = 1, L_BASS = 2, L_PAD = 4, L_LEAD = 8, L_ARP = 16, L_ALL = 31;
+    public static final String[] LAYER_NAMES = {"드럼", "베이스", "패드", "멜로디", "아르페지오"};
+
     public static Song generate(MapCode m) {
-        return new Gen(m).run();
+        return new Gen(m, L_ALL).run();
+    }
+
+    public static Song generate(MapCode m, int layers) {
+        return new Gen(m, layers).run();
+    }
+
+    /** 같은 음악에 다른 채보(직접 만든 노트)를 붙인 곡. */
+    public Song withNotes(List<Note> ns) {
+        return new Song(map, pcm, ns, beatSec, bars, barEnergy);
     }
 
     /** 해당 시점의 곡 세기 (0..1), 시각효과용. */
@@ -93,7 +106,14 @@ public final class Song {
         final float[] duckCurve;
         final float[] barEnergy;
 
-        Gen(MapCode m) {
+        final int layers;
+
+        boolean lay(int bit) {
+            return (layers & bit) != 0;
+        }
+
+        Gen(MapCode m, int layers) {
+            this.layers = layers;
             this.m = m;
             style = m.style;
             rnd = new Random(m.seed * 1000003L + m.style * 7919L + m.key * 31L + (m.minor ? 1 : 0) + m.bpm * 131L);
@@ -319,12 +339,12 @@ public final class Song {
                 boolean secStart = sec != prev;
                 prev = sec;
                 int cd = prog[bar % 4];
-                drumsBar(bar, sec);
-                bassBar(bar, sec, cd);
-                padBar(bar, sec, cd);
+                if (lay(L_DRUMS)) drumsBar(bar, sec);
+                if (lay(L_BASS)) bassBar(bar, sec, cd);
+                if (lay(L_PAD)) padBar(bar, sec, cd);
                 leadBar(bar, sec, cd);
                 if (secStart && (sec == DROP || sec == BREAK)) {
-                    hit(crashS, t(bar, 0), 0.35f);
+                    if (lay(L_DRUMS)) hit(crashS, t(bar, 0), 0.35f);
                     cand(t(bar, 0), 0, true);
                 } else if (sec == DROP && bar % 2 == 0) {
                     cand(t(bar, 0), 1, true);
@@ -490,7 +510,7 @@ public final class Song {
                     if (!mOn[ms]) continue;
                     int deg = mDeg[ms] + (((bar / 2) % 2 == 1 && ms >= 24) ? varShift : 0);
                     double tt = t(bar, s);
-                    synth(lead, tt, mDur[ms] * step * 0.9, hz(note(base, cd + deg)), w, 0.16f, c0, c1, dec, det, 0, 0.004, 0.06);
+                    if (lay(L_LEAD)) synth(lead, tt, mDur[ms] * step * 0.9, hz(note(base, cd + deg)), w, 0.16f, c0, c1, dec, det, 0, 0.004, 0.06);
                     cand(tt, s % 2 == 0 ? 2 : 3, false);
                 }
             } else if (sec == BREAK) {
@@ -498,7 +518,7 @@ public final class Song {
                     int ms = (bar % 2) * 16 + s;
                     if (!mOn[ms]) continue;
                     double tt = t(bar, s);
-                    synth(lead, tt, Math.max(2, mDur[ms]) * step, hz(note(base, cd + mDeg[ms])), 3, 0.13f, 3000, 2000, 3, false, 0, 0.01, 0.1);
+                    if (lay(L_LEAD)) synth(lead, tt, Math.max(2, mDur[ms]) * step, hz(note(base, cd + mDeg[ms])), 3, 0.13f, 3000, 2000, 3, false, 0, 0.01, 0.1);
                     cand(tt, s % 4 == 0 ? 1 : 2, false);
                 }
             } else if (sec == VERSE || sec == BUILD) {
@@ -506,7 +526,7 @@ public final class Song {
                 for (int s = 0, i = 0; s < 16; s += every, i++) {
                     int deg = cd + arpPat[i % 4] + 7;
                     double tt = t(bar, s);
-                    synth(lead, tt, every * step * 0.8, hz(note(base, deg)), 3, 0.08f, 5000, 2000, 12, false, 0, 0.002, 0.03);
+                    if (lay(L_ARP)) synth(lead, tt, every * step * 0.8, hz(note(base, deg)), 3, 0.08f, 5000, 2000, 12, false, 0, 0.002, 0.03);
                     if (sec == VERSE) cand(tt, s % 4 == 0 ? 2 : 3, false);
                 }
             }
