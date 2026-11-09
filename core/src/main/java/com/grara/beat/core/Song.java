@@ -47,7 +47,9 @@ public final class Song {
     }
 
     public double lastNoteTime() {
-        return notes.isEmpty() ? musicEnd() : notes.get(notes.size() - 1).time;
+        double m = 0;
+        for (Note n : notes) m = Math.max(m, n.end);
+        return notes.isEmpty() ? musicEnd() : m;
     }
 
     public int count(int type) {
@@ -577,7 +579,30 @@ public final class Song {
                     notes.add(new Note(c.t, Note.TAP, 0, ang));
                 }
             }
-            return notes;
+            return mergeHolds(notes);
+        }
+
+        /** 짧은 간격으로 3개 이상 이어지는 탭 노트를 하나의 줄(HOLD) 노트로 합친다. */
+        List<Note> mergeHolds(ArrayList<Note> in) {
+            double maxGap = Math.max(0.17, beat * 0.5 + 0.01);
+            ArrayList<Note> out = new ArrayList<>();
+            int i = 0;
+            while (i < in.size()) {
+                Note a = in.get(i);
+                int j = i;
+                if (a.type == Note.TAP) {
+                    while (j + 1 < in.size() && in.get(j + 1).type == Note.TAP
+                            && in.get(j + 1).time - in.get(j).time <= maxGap) j++;
+                }
+                if (j - i >= 2 && in.get(j).time - a.time >= 0.3) {
+                    out.add(new Note(a.time, in.get(j).time, Note.HOLD, 0, a.angle));
+                    i = j + 1;
+                } else {
+                    out.add(a);
+                    i++;
+                }
+            }
+            return out;
         }
     }
 }

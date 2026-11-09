@@ -264,7 +264,7 @@ public class MakerActivity extends Activity {
                 }
                 song = s;
                 infoView.setText(m.summary() + "\n" + m.keyName() + " · 길이 " + m.lengthText()
-                        + "\n노트 " + s.notes.size() + "개 (탭 " + s.count(Note.TAP) + " · 베젤 " + s.count(Note.SPIN) + ")");
+                        + "\n노트 " + s.notes.size() + "개 (탭 " + s.count(Note.TAP) + " · 줄 " + s.count(Note.HOLD) + " · 베젤 " + s.count(Note.SPIN) + ")");
                 player = new AudioPlayer(s.pcm);
                 player.start();
                 chart.setSong(s, player);
@@ -364,9 +364,16 @@ public class MakerActivity extends Activity {
             float pps = w / 4f;
             for (Note n : song.notes) {
                 float x = hitX + (float) ((n.time - t) * pps);
-                if (x < -20) continue;
+                float xe = hitX + (float) ((n.end - t) * pps);
+                if (xe < -20) continue;
                 if (x > w + 20) break;
-                if (n.type == Note.TAP) {
+                if (n.type == Note.HOLD) {
+                    p.setStyle(Paint.Style.FILL);
+                    p.setColor(Color.argb(170, 0, 229, 255));
+                    c.drawRoundRect(x, h * 0.52f, xe, h * 0.72f, h * 0.1f, h * 0.1f, p);
+                    p.setColor(Color.WHITE);
+                    c.drawCircle(x, h * 0.62f, h * 0.09f, p);
+                } else if (n.type == Note.TAP) {
                     p.setStyle(Paint.Style.FILL);
                     p.setColor(Color.rgb(0, 229, 255));
                     c.drawCircle(x, h * 0.62f, h * 0.09f, p);
@@ -382,7 +389,7 @@ public class MakerActivity extends Activity {
             p.setColor(Color.LTGRAY);
             p.setTextSize(h * 0.12f);
             p.setTextAlign(Paint.Align.LEFT);
-            c.drawText("● 탭   ○ 베젤 (주황=시계, 보라=반시계, 초록=아무쪽)", 16, h * 0.93f, p);
+            c.drawText("● 탭  ━ 줄(누르기/베젤)  ○ 베젤 (주황=시계, 보라=반시계)", 16, h * 0.93f, p);
             if (player != null) postInvalidateOnAnimation();
         }
     }

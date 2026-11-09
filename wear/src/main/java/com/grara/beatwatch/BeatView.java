@@ -123,7 +123,10 @@ public class BeatView extends View {
     // 입력
     private float downX, downY;
     private long downTime;
-    private boolean swiped, scrolled;
+    private boolean swiped, scrolled, touching;
+    private Note activeHold;
+    private boolean holdByBezel;
+    private double lastBezelT;
     private float rotAcc;
     private long lastRot;
 
@@ -258,6 +261,7 @@ public class BeatView extends View {
                 downTime = e.getEventTime();
                 swiped = false;
                 scrolled = false;
+                touching = true;
                 if (screen == S_PLAY) inputTap(e.getEventTime());
                 return true;
             case MotionEvent.ACTION_POINTER_DOWN:
@@ -281,7 +285,11 @@ public class BeatView extends View {
                 invalidate();
                 return true;
             }
+            case MotionEvent.ACTION_CANCEL:
+                touching = false;
+                return true;
             case MotionEvent.ACTION_UP: {
+                touching = false;
                 if (screen == S_PLAY || swiped || scrolled) return true;
                 float dx = e.getX() - downX, dy = e.getY() - downY;
                 if (Math.abs(dx) < W * 0.08f && Math.abs(dy) < W * 0.08f) {
@@ -391,7 +399,11 @@ public class BeatView extends View {
 
     private void startPlay() {
         stopPlayer();
-        for (Note n : song.notes) n.result = -1;
+        for (Note n : song.notes) {
+            n.result = -1;
+            n.tailResult = -1;
+        }
+        activeHold = null;
         nextIdx = 0;
         combo = maxCombo = score = 0;
         life = 100;
@@ -426,18 +438,39 @@ public class BeatView extends View {
         if (player == null) return;
         double t = songTimeAt(eventTime);
         Note best = findNote(t, Note.TAP, 0);
-        if (best != null) judge(best, t - best.time, false);
+        if (best != null) {
+            if (best.type == Note.HOLD) {
+                activeHold = best;
+                holdByBezel = false;
+            }
+            judge(best, t - best.time, false);
+        }
     }
 
     private void inputSpin(int dir, long eventTime) {
         if (player == null) return;
         double t = songTimeAt(eventTime);
+        if (activeHold != null && holdByBezel) {
+            lastBezelT = t; // 베젤로 줄 유지 중
+            return;
+        }
         Note best = findNote(t, Note.SPIN, dir);
-        if (best != null) judge(best, t - best.time, best.dir != 0 && best.dir != dir);
+        if (best != null) {
+            judge(best, t - best.time, best.dir != 0 && best.dir != dir);
+            return;
+        }
+        // 베젤로도 줄 노트를 시작할 수 있음
+        best = findNote(t, Note.HOLD, 0);
+        if (best != null) {
+            activeHold = best;
+            holdByBezel = true;
+            lastBezelT = t;
+            judge(best, t - best.time, false);
+        }
     }
 
     private static double win(int type) {
-        return type == Note.SPIN ? W_GOOD * SPIN_MUL : W_GOOD;
+        return type == Note.TAP ? W_GOOD : W_GOOD * SPIN_MUL;
     }
 
     private Note findNote(double t, int type, int dir) {
@@ -448,7 +481,9 @@ public class BeatView extends View {
         for (int i = nextIdx; i < ns.size(); i++) {
             Note n = ns.get(i);
             if (n.time > t + w) break;
-            if (n.result >= 0 || n.type != type) continue;
+            if (n.result >= 0) continue;
+            boolean ok = n.type == type || (type == Note.TAP && n.type == Note.HOLD);
+            if (!ok) continue;
             double d = Math.abs(n.time - t);
             if (d <= bd) {
                 bd = d;
@@ -459,7 +494,7 @@ public class BeatView extends View {
     }
 
     private void judge(Note n, double off, boolean wrongDir) {
-        double a = Math.abs(off) / (n.type == Note.SPIN ? SPIN_MUL : 1);
+        double a = Math.abs(off) / (n.type == Note.SPIN || (n.type == Note.HOLD && holdByBezel) ? SPIN_MUL : 1);
         int res = a <= W_PERFECT ? R_PERFECT : a <= W_GREAT ? R_GREAT : R_GOOD;
         if (wrongDir) res = R_GOOD; // 방향이 틀려도 실패는 아님 (GOOD)
         n.result = res;
@@ -476,7 +511,7 @@ public class BeatView extends View {
         judgeText = names[res];
         judgeColor = cols[res];
         judgeT = 0.6f;
-        if (n.type == Note.TAP) {
+        if (n.type != Note.SPIN) {
             double ang = Math.toRadians(n.angle);
             burst((float) (cx + Math.cos(ang) * R), (float) (cy + Math.sin(ang) * R), cols[res]);
         } else {
@@ -492,6 +527,10 @@ public class BeatView extends View {
     private void miss(Note n) {
         n.result = R_MISS;
         counts[R_MISS]++;
+        if (n.type == Note.HOLD && n.tailResult < 0) {
+            n.tailResult = R_MISS;
+            counts[R_MISS]++;
+        }
         combo = 0;
         life -= cur.diff == 3 ? 14 : 10;
         judgeText = "MISS";
@@ -513,7 +552,12 @@ public class BeatView extends View {
                 n.result = R_MISS;
                 counts[R_MISS]++;
             }
+            if (n.type == Note.HOLD && n.tailResult < 0) {
+                n.tailResult = R_MISS;
+                counts[R_MISS]++;
+            }
         }
+        activeHold = null;
         float acc = accuracy();
         String key = "best_" + cur.code();
         float prev = prefs.getFloat(key, -1);
@@ -789,6 +833,42 @@ public class BeatView extends View {
     private void updatePlay() {
         if (player == null) return;
         playT = songTime();
+        // 줄 노트 유지 판정
+        if (activeHold != null) {
+            Note h = activeHold;
+            if (playT >= h.end - 0.06) {
+                h.tailResult = R_PERFECT;
+                counts[R_PERFECT]++;
+                combo++;
+                maxCombo = Math.max(maxCombo, combo);
+                score += (int) (300 * (1 + Math.min(combo, 100) / 100f));
+                judgeText = "PERFECT";
+                judgeColor = Color.rgb(120, 240, 255);
+                judgeT = 0.6f;
+                double ang = Math.toRadians(h.angle);
+                burst((float) (cx + Math.cos(ang) * R), (float) (cy + Math.sin(ang) * R), Color.WHITE);
+                activeHold = null;
+            } else if (holdByBezel ? playT - lastBezelT > 0.4 : !touching) {
+                activeHold = null;
+                h.tailResult = R_MISS;
+                counts[R_MISS]++;
+                combo = 0;
+                life -= 6;
+                judgeText = "끊김";
+                judgeColor = Color.rgb(255, 70, 90);
+                judgeT = 0.6f;
+                if (life <= 0) {
+                    life = 0;
+                    failed = true;
+                    buzz(200);
+                    finishPlay();
+                    return;
+                }
+            } else if (((int) (playT * 12)) != ((int) ((playT - 0.016) * 12))) {
+                double ang = Math.toRadians(h.angle);
+                burst((float) (cx + Math.cos(ang) * R), (float) (cy + Math.sin(ang) * R), STYLE_COLOR[cur.style]);
+            }
+        }
         List<Note> ns = song.notes;
         while (nextIdx < ns.size()) {
             Note n = ns.get(nextIdx);
@@ -841,6 +921,12 @@ public class BeatView extends View {
         for (int i = Math.max(0, nextIdx - 4); i < ns.size(); i++) {
             Note n = ns.get(i);
             if (n.time > t + ap) break;
+            if (n.type == Note.HOLD) {
+                boolean active = n == activeHold;
+                if (n.result >= 0 && !active) continue;
+                drawHold(c, n, t, ap, col, active);
+                continue;
+            }
             if (n.result >= 0) continue;
             float prog = (float) (1 - (n.time - t) / ap);
             if (prog < 0) continue;
@@ -909,7 +995,42 @@ public class BeatView extends View {
         if (t < Song.LEAD_IN - 0.2) {
             text.setTextSize(W * 0.045f);
             text.setColor(Color.LTGRAY);
-            c.drawText("점: 탭 · 링: 베젤 돌리기", cx, cy + W * 0.2f, text);
+            c.drawText("점: 탭 · 링: 베젤", cx, cy + W * 0.17f, text);
+            c.drawText("줄: 누르고 있기 / 베젤 계속 돌리기", cx, cy + W * 0.23f, text);
+        }
+    }
+
+    /** 줄(롱노트): 머리부터 꼬리까지 이어진 굵은 선. 누르고 있으면 머리가 링에 고정. */
+    private void drawHold(Canvas c, Note n, double t, double ap, int col, boolean active) {
+        float pHead = active ? 1f : (float) (1 - (n.time - t) / ap);
+        float pTail = (float) (1 - (n.end - t) / ap);
+        if (pHead < 0) return;
+        pHead = Math.min(pHead, 1.05f);
+        pTail = Math.max(0f, Math.min(pTail, pHead));
+        double a = Math.toRadians(n.angle);
+        float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
+        float hx = cx + ca * R * pHead, hy = cy + sa * R * pHead;
+        float tx = cx + ca * R * pTail, ty = cy + sa * R * pTail;
+        float width = W * 0.07f * (0.5f + 0.5f * Math.min(1f, pHead));
+        stroke.setStrokeWidth(width * 1.5f);
+        stroke.setColor(alpha(col, active ? 110 : 60));
+        c.drawLine(hx, hy, tx, ty, stroke);
+        stroke.setStrokeWidth(width);
+        stroke.setColor(alpha(col, active ? 255 : 190));
+        c.drawLine(hx, hy, tx, ty, stroke);
+        stroke.setStrokeWidth(width * 0.35f);
+        stroke.setColor(alpha(Color.WHITE, active ? 230 : 150));
+        c.drawLine(hx, hy, tx, ty, stroke);
+        float size = W * 0.05f * (0.5f + 0.5f * Math.min(1f, pHead));
+        glow(c, hx, hy, size * (active ? 3f : 2.2f), alpha(col, active ? 200 : 120));
+        p.setColor(Color.WHITE);
+        c.drawCircle(hx, hy, size * 0.75f, p);
+        p.setColor(col);
+        c.drawCircle(tx, ty, size * 0.45f, p);
+        if (active && holdByBezel) {
+            text.setTextSize(W * 0.04f);
+            text.setColor(Color.WHITE);
+            c.drawText("계속 돌리기!", cx, cy + W * 0.17f, text);
         }
     }
 
