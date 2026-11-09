@@ -1,0 +1,36 @@
+plugins { id 'com.android.application' }
+
+def localProps = new Properties()
+def lp = rootProject.file('local.properties')
+if (lp.exists()) lp.withInputStream { localProps.load(it) }
+
+android {
+    namespace 'com.grara.beatmaker'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'com.grara.beatmaker'
+        minSdk 28
+        targetSdk 34
+        versionCode Integer.parseInt(project.property('beatVersionCode').toString())
+        versionName project.property('beatVersionName').toString()
+    }
+    signingConfigs {
+        release {
+            storeFile file(localProps.getProperty('release.storeFile', 'missing.jks'))
+            storePassword localProps.getProperty('release.storePassword', '')
+            keyAlias localProps.getProperty('release.keyAlias', '')
+            keyPassword localProps.getProperty('release.keyPassword', '')
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+dependencies { implementation project(':core') }
