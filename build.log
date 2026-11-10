@@ -1,0 +1,9 @@
+﻿.\gradlew.bat : Note: C:\Users\grara\Desktop\BeatWatch\wear\src\main\java\com\grara\beatwatch\MainActivity.java uses or
+ overrides a deprecated API.
+At line:1 char:418
++ ... BeatWatch"; .\gradlew.bat :wear:assembleDebug :phone:assembleDebug -- ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Note: C:\Users\...deprecated API.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Note: Recompile with -Xlint:deprecation for details.

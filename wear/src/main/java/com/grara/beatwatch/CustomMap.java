@@ -21,7 +21,7 @@ public final class CustomMap {
     public int layers = Song.L_ALL;
     /** 녹음 박자 맞춤: 0 끔, 1 8분음표, 2 16분음표 */
     public int quant = 2;
-    /** 노트: {time, end, type, dir, angle(-1 = 자동)} */
+    /** 노트: {time, end, type, dir, angle(-1 = 자동), trick} */
     public final ArrayList<double[]> notes = new ArrayList<>();
 
     public MapCode code() {
@@ -52,14 +52,14 @@ public final class CustomMap {
             float ang = (float) ((((n[0] - Song.LEAD_IN) / beat) * 45.0 + 270) % 360);
             if (ang < 0) ang += 360;
             if (n.length > 4 && n[4] >= 0) ang = (float) n[4];
-            out.add(new Note(n[0], Math.max(n[0], n[1]), (int) n[2], (int) n[3], ang));
+            out.add(new Note(n[0], Math.max(n[0], n[1]), (int) n[2], (int) n[3], ang, n.length > 5 ? (int) n[5] : 0));
         }
         return out;
     }
 
     public void setFromNotes(List<Note> ns) {
         notes.clear();
-        for (Note n : ns) notes.add(new double[]{n.time, n.end, n.type, n.dir, -1});
+        for (Note n : ns) notes.add(new double[]{n.time, n.end, n.type, n.dir, -1, n.trick});
     }
 
     public double snap(double t) {
@@ -80,7 +80,7 @@ public final class CustomMap {
         JSONArray a = new JSONArray();
         for (double[] n : notes) {
             a.put(new JSONArray().put(Math.round(n[0] * 1000) / 1000.0).put(Math.round(n[1] * 1000) / 1000.0)
-                    .put((int) n[2]).put((int) n[3]).put(n.length > 4 ? (int) n[4] : -1));
+                    .put((int) n[2]).put((int) n[3]).put(n.length > 4 ? (int) n[4] : -1).put(n.length > 5 ? (int) n[5] : 0));
         }
         o.put("notes", a);
         return o;
@@ -99,7 +99,7 @@ public final class CustomMap {
         if (a != null) {
             for (int i = 0; i < a.length(); i++) {
                 JSONArray n = a.getJSONArray(i);
-                c.notes.add(new double[]{n.getDouble(0), n.getDouble(1), n.getInt(2), n.getInt(3), n.optInt(4, -1)});
+                c.notes.add(new double[]{n.getDouble(0), n.getDouble(1), n.getInt(2), n.getInt(3), n.optInt(4, -1), n.optInt(5, 0)});
             }
         }
         return c;

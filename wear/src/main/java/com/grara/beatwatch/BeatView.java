@@ -168,6 +168,7 @@ public class BeatView extends View {
     private float judgeT, ringFlash;
     private double playT;
     private int syncMs;
+    private boolean hasBombs;
 
     // 결과
     private float resultT;
@@ -276,6 +277,10 @@ public class BeatView extends View {
                 finishRec();
                 return true;
             case S_EDIT:
+                if (edPicker || edPatterns) {
+                    edPicker = edPatterns = false;
+                    return true;
+                }
                 stopEdPlayer();
                 saveCustoms();
                 screen = S_MENU;
@@ -707,6 +712,25 @@ public class BeatView extends View {
         its.add(new Item("녹음 (덧입히기)", "기존 노트 위에 더 찍기", () -> startRec(cm, true)));
         its.add(new Item("노트 편집", "베젤로 이동하며 하나씩", () -> startEdit(cm)));
         its.add(new Item("곡 설정", "장르 · BPM · 키 · 악기", () -> openCustomSettings(cm)));
+        its.add(new Item("트릭 랜덤으로 넣기", "숨김·깜짝·회오리·폭탄 등을 섞어요", () -> {
+            Random rr = new Random();
+            int n = 0;
+            for (double[] x : cm.notes) {
+                if (x[5] != 0 || rr.nextFloat() > 0.22f) continue;
+                int tr = 1 + rr.nextInt(Note.TR_COUNT - 1);
+                if (tr == Note.TR_BOMB && rr.nextFloat() < 0.6f) tr = Note.TR_SPIRAL;
+                if (!Note.trickAllowed((int) x[2], tr)) tr = Note.TR_SUDDEN;
+                x[5] = tr;
+                n++;
+            }
+            saveCustoms();
+            showToast("트릭 " + n + "개를 넣었어요");
+        }));
+        its.add(new Item("트릭 모두 지우기", "노트는 그대로, 트릭만 없애요", () -> {
+            for (double[] x : cm.notes) x[5] = 0;
+            saveCustoms();
+            showToast("트릭을 모두 지웠어요");
+        }));
         its.add(new Item("자동 채보로 채우기", "지금 음악에 맞춰 다시 만들기", () -> {
             final MapCode m = cm.code();
             screen = S_LOADING;
@@ -802,6 +826,7 @@ public class BeatView extends View {
         curCustom = cm;
         loadCustomSong(cm, () -> {
             if (!overdub) cm.notes.clear();
+            edUndo.clear();
             recCount = 0;
             recDownT = -1;
             lastRecSpinT = -9;
@@ -821,7 +846,7 @@ public class BeatView extends View {
             if (Math.abs(cm.notes.get(i)[0] - st) < 0.04) cm.notes.remove(i);
         }
         double en = type == Note.HOLD ? Math.max(st + cm.beat() / 2, cm.snap(end)) : st;
-        cm.notes.add(new double[]{st, en, type, dir, -1});
+        cm.notes.add(new double[]{st, en, type, dir, -1, 0});
         recCount++;
         recFlash = 1f;
         recLast = type == Note.HOLD ? "줄" : type == Note.SPIN ? (dir > 0 ? "베젤 ↻" : "베젤 ↺") : "탭";
@@ -865,7 +890,9 @@ public class BeatView extends View {
             edT = Song.LEAD_IN;
             edSel = null;
             edPicker = false;
+            edPatterns = false;
             edAngleMode = false;
+            edUndo.clear();
             screen = S_EDIT;
             updateEdInfo();
         });
@@ -879,10 +906,129 @@ public class BeatView extends View {
     }
 
     private static final String[] GRID_NAMES = {"1박", "1/8", "1/16", "1/32", "자유"};
-    private static final String[] PICK_NAMES = {"탭", "줄", "베젤↻", "베젤↺", "베젤 아무"};
+    private static final String[] PICK_NAMES = {"탭", "줄", "베젤↻", "베젤↺", "베젤 아무", "패턴 ★"};
+    private static final String[] PATTERN_NAMES = {"연타", "계단", "지그재그", "베젤 교대", "폭탄 사이", "트릭 쇼"};
+    private static final String[] TRICK_SHORT = {"", "숨", "깜", "가", "감", "회", "흔", "✕"};
     private int edGrid = 2;
     private double[] edSel;
-    private boolean edPicker, edAngleMode;
+    private boolean edPicker, edPatterns, edAngleMode;
+    private final ArrayList<ArrayList<double[]>> edUndo = new ArrayList<>();
+
+    /** 바꾸기 전에 지금 노트를 저장 (되돌리기용, 최대 40번) */
+    private void pushUndo() {
+        ArrayList<double[]> snap = new ArrayList<>();
+        for (double[] n : curCustom.notes) snap.add(n.clone());
+        edUndo.add(snap);
+        if (edUndo.size() > 40) edUndo.remove(0);
+    }
+
+    private void edDoUndo() {
+        if (edUndo.isEmpty()) {
+            edInfo = "되돌릴 게 없어요";
+            return;
+        }
+        ArrayList<double[]> snap = edUndo.remove(edUndo.size() - 1);
+        curCustom.notes.clear();
+        curCustom.notes.addAll(snap);
+        edSel = null;
+        edAngleMode = false;
+        saveCustoms();
+        tick();
+        updateEdInfo();
+        edInfo = "되돌렸어요 · 노트 " + curCustom.notes.size() + "개";
+    }
+
+    private double autoAngle(double t) {
+        double a = (((t - Song.LEAD_IN) / curCustom.beat()) * 45.0 + 270) % 360;
+        return a < 0 ? a + 360 : a;
+    }
+
+    private static double norm(double a) {
+        a %= 360;
+        return a < 0 ? a + 360 : a;
+    }
+
+    /** 패턴 도장: 지금 위치부터 미리 만든 노트 묶음을 찍고, 끝난 다음 칸으로 이동 */
+    private void edStamp(int k) {
+        CustomMap cm = curCustom;
+        double b = cm.beat(), t0 = edT, base = Math.round(autoAngle(t0) / 15.0) * 15;
+        ArrayList<double[]> add = new ArrayList<>();
+        double step;
+        switch (k) {
+            case 0: // 연타: 16분음표 4개, 같은 자리
+                step = b / 4;
+                for (int i = 0; i < 4; i++) add.add(new double[]{t0 + i * step, t0 + i * step, Note.TAP, 0, base, 0});
+                break;
+            case 1: // 계단: 8분음표 4개, 45도씩 돌기
+                step = b / 2;
+                for (int i = 0; i < 4; i++) add.add(new double[]{t0 + i * step, t0 + i * step, Note.TAP, 0, norm(base + i * 45), 0});
+                break;
+            case 2: // 지그재그: 반대편 왔다 갔다
+                step = b / 2;
+                for (int i = 0; i < 4; i++) add.add(new double[]{t0 + i * step, t0 + i * step, Note.TAP, 0, norm(base + (i % 2) * 180), 0});
+                break;
+            case 3: // 베젤 교대: ↻ ↺ ↻ ↺ 한 박마다
+                step = b;
+                for (int i = 0; i < 4; i++) add.add(new double[]{t0 + i * step, t0 + i * step, Note.SPIN, i % 2 == 0 ? 1 : -1, -1, 0});
+                break;
+            case 4: // 폭탄 사이: 탭 사이사이에 누르면 안 되는 폭탄
+                step = b / 2;
+                for (int i = 0; i < 6; i++) {
+                    boolean bomb = i % 2 == 1;
+                    add.add(new double[]{t0 + i * step, t0 + i * step, Note.TAP, 0, norm(base + (bomb ? 180 : (i / 2) * 60)), bomb ? Note.TR_BOMB : 0});
+                }
+                break;
+            default: // 트릭 쇼: 숨김 · 깜짝 · 회오리 · 흔들
+                step = b / 2;
+                int[] tr = {Note.TR_HIDDEN, Note.TR_SUDDEN, Note.TR_SPIRAL, Note.TR_WOBBLE};
+                for (int i = 0; i < 4; i++) add.add(new double[]{t0 + i * step, t0 + i * step, Note.TAP, 0, norm(base + i * 90), tr[i]});
+        }
+        pushUndo();
+        for (double[] n : add) {
+            for (int i = cm.notes.size() - 1; i >= 0; i--) {
+                double[] o = cm.notes.get(i);
+                if (Math.abs(o[0] - n[0]) < 0.02 && (int) o[2] == (int) n[2]) cm.notes.remove(i);
+            }
+            cm.notes.add(n);
+        }
+        edT = add.get(add.size() - 1)[0] + step;
+        edSel = null;
+        edAngleMode = false;
+        tick();
+        saveCustoms();
+        updateEdInfo();
+        edInfo = "패턴 " + PATTERN_NAMES[k] + " · 노트 " + add.size() + "개";
+    }
+
+    /** 바로 앞 한 마디를 지금 위치에 그대로 복사 (덮어쓰기) */
+    private void edCopyBar() {
+        CustomMap cm = curCustom;
+        double bar = cm.beat() * 4, from = edT - bar;
+        ArrayList<double[]> src = new ArrayList<>();
+        for (double[] n : cm.notes) if (n[0] >= from - 0.005 && n[0] < edT - 0.005) src.add(n);
+        if (src.isEmpty()) {
+            edInfo = "앞 마디에 노트가 없어요";
+            return;
+        }
+        pushUndo();
+        for (int i = cm.notes.size() - 1; i >= 0; i--) {
+            double t = cm.notes.get(i)[0];
+            if (t >= edT - 0.005 && t < edT + bar - 0.005) cm.notes.remove(i);
+        }
+        for (double[] n : src) {
+            double[] c = n.clone();
+            c[0] += bar;
+            c[1] += bar;
+            cm.notes.add(c);
+        }
+        edT += bar;
+        edSel = null;
+        edAngleMode = false;
+        tick();
+        saveCustoms();
+        updateEdInfo();
+        edInfo = "앞 마디 복사 · 노트 " + src.size() + "개";
+    }
 
     private double edStep() {
         double b = curCustom.beat();
@@ -896,7 +1042,7 @@ public class BeatView extends View {
     }
 
     private void edRotary(int dir) {
-        if (edPlayer != null || edPicker) return;
+        if (edPlayer != null || edPicker || edPatterns) return;
         if (edAngleMode && edSel != null && (int) edSel[2] != Note.SPIN) {
             edSel[4] = Math.floorMod((int) Math.round(edAngle(edSel)) + dir * 15, 360);
             saveCustoms();
@@ -932,6 +1078,13 @@ public class BeatView extends View {
 
     private static String typeName(double[] n) {
         int type = (int) n[2], dir = (int) n[3];
+        int tr = n.length > 5 ? (int) n[5] : 0;
+        if (tr == Note.TR_BOMB) return "폭탄";
+        String base = typeNameBase(type, dir);
+        return tr > 0 ? base + "+" + Note.TRICK_NAMES[tr] : base;
+    }
+
+    private static String typeNameBase(int type, int dir) {
         if (type == Note.HOLD) return "줄";
         if (type == Note.SPIN) return dir > 0 ? "베젤 시계" : dir < 0 ? "베젤 반시계" : "베젤 아무쪽";
         return "탭";
@@ -954,8 +1107,8 @@ public class BeatView extends View {
         return (float) Math.hypot(x1 - x2, y1 - y2);
     }
 
-    private float[] pickPos(int k) {
-        double a = Math.toRadians(-90 + k * 72);
+    private float[] pickPos(int k, int count) {
+        double a = Math.toRadians(-90 + k * 360.0 / count);
         return new float[]{cx + (float) Math.cos(a) * W * 0.25f, cy + (float) Math.sin(a) * W * 0.25f};
     }
 
@@ -963,11 +1116,11 @@ public class BeatView extends View {
         CustomMap cm = curCustom;
         double[] n;
         switch (k) {
-            case 0: n = new double[]{edT, edT, Note.TAP, 0, -1}; break;
-            case 1: n = new double[]{edT, edT + cm.beat(), Note.HOLD, 0, -1}; break;
-            case 2: n = new double[]{edT, edT, Note.SPIN, 1, -1}; break;
-            case 3: n = new double[]{edT, edT, Note.SPIN, -1, -1}; break;
-            default: n = new double[]{edT, edT, Note.SPIN, 0, -1};
+            case 0: n = new double[]{edT, edT, Note.TAP, 0, -1, 0}; break;
+            case 1: n = new double[]{edT, edT + cm.beat(), Note.HOLD, 0, -1, 0}; break;
+            case 2: n = new double[]{edT, edT, Note.SPIN, 1, -1, 0}; break;
+            case 3: n = new double[]{edT, edT, Note.SPIN, -1, -1, 0}; break;
+            default: n = new double[]{edT, edT, Note.SPIN, 0, -1, 0};
         }
         for (double[] o : notesAtEd()) {
             if ((int) o[2] == (int) n[2] && (int) o[3] == (int) n[3]) {
@@ -977,6 +1130,7 @@ public class BeatView extends View {
                 return;
             }
         }
+        pushUndo();
         cm.notes.add(n);
         edSel = n;
         tick();
@@ -986,14 +1140,22 @@ public class BeatView extends View {
 
     private void edTap(float x, float y, boolean longPress) {
         CustomMap cm = curCustom;
-        if (edPicker) {
-            edPicker = false;
-            for (int k = 0; k < 5; k++) {
-                float[] pp = pickPos(k);
+        if (edPicker || edPatterns) {
+            boolean pat = edPatterns;
+            edPicker = edPatterns = false;
+            int count = pat ? PATTERN_NAMES.length : PICK_NAMES.length;
+            for (int k = 0; k < count; k++) {
+                float[] pp = pickPos(k, count);
                 if (dist(x, y, pp[0], pp[1]) < W * 0.1f) {
-                    edAddNote(k);
+                    if (pat) edStamp(k);
+                    else if (k == 5) edPatterns = true;
+                    else edAddNote(k);
                     return;
                 }
+            }
+            if (dist(x, y, cx, cy) < W * 0.12f) {
+                if (pat) edCopyBar();
+                else edDoUndo();
             }
             return;
         }
@@ -1015,9 +1177,9 @@ public class BeatView extends View {
             updateEdInfo();
             return;
         }
-        // 아래 버튼 줄: 격자 / 길이 / 각도 / 겹친 노트 고르기
-        if (Math.abs(y - H * 0.85f) < W * 0.065f && Math.abs(x - cx) < W * 0.36f) {
-            int k = Math.max(0, Math.min(3, (int) Math.floor((x - (cx - W * 0.36f)) / (W * 0.18f))));
+        // 아래 버튼 줄: 격자 / 길이 / 각도 / 트릭 / 겹친 노트 고르기
+        if (Math.abs(y - H * 0.83f) < W * 0.065f && Math.abs(x - cx) < W * 0.375f) {
+            int k = Math.max(0, Math.min(4, (int) Math.floor((x - (cx - W * 0.375f)) / (W * 0.15f))));
             if (k == 0) {
                 edGrid = (edGrid + 1) % GRID_NAMES.length;
                 updateEdInfo();
@@ -1026,6 +1188,7 @@ public class BeatView extends View {
                 if (edSel != null && (int) edSel[2] == Note.HOLD) {
                     double[] lens = {0.5, 1, 2, 3, 4, 6, 8};
                     double curLen = (edSel[1] - edSel[0]) / cm.beat();
+                    pushUndo();
                     int i = 0;
                     while (i < lens.length && lens[i] <= curLen + 0.01) i++;
                     edSel[1] = edSel[0] + lens[i % lens.length] * cm.beat();
@@ -1038,11 +1201,24 @@ public class BeatView extends View {
             } else if (k == 2) {
                 if (edSel != null && (int) edSel[2] != Note.SPIN) {
                     edAngleMode = !edAngleMode;
+                    if (edAngleMode) pushUndo();
                     if (edAngleMode && edSel[4] < 0) edSel[4] = Math.round(edAngle(edSel) / 15.0) * 15 % 360;
                     updateEdInfo();
                     edInfo = edAngleMode ? "베젤로 방향 돌리기 · " + (int) edAngle(edSel) + "°" : "방향 조절 끝";
                 } else {
                     edInfo = "탭/줄 노트만 방향을 정해요";
+                }
+            } else if (k == 3) {
+                if (edSel != null) {
+                    pushUndo();
+                    int type = (int) edSel[2], tr = (int) edSel[5];
+                    do tr = (tr + 1) % Note.TR_COUNT; while (!Note.trickAllowed(type, tr));
+                    edSel[5] = tr;
+                    saveCustoms();
+                    updateEdInfo();
+                    edInfo = "트릭: " + Note.TRICK_NAMES[tr] + (tr == Note.TR_BOMB ? " (누르면 안 돼요)" : "");
+                } else {
+                    edInfo = "노트를 먼저 고르세요";
                 }
             } else {
                 ArrayList<double[]> ns = notesAtEd();
@@ -1069,6 +1245,7 @@ public class BeatView extends View {
         }
         if (longPress) {
             if (edSel != null) {
+                pushUndo();
                 cm.notes.remove(edSel);
                 edSel = null;
                 edAngleMode = false;
@@ -1088,6 +1265,8 @@ public class BeatView extends View {
             n.tailResult = -1;
         }
         activeHold = null;
+        hasBombs = false;
+        for (Note n : song.notes) if (n.trick == Note.TR_BOMB) hasBombs = true;
         nextIdx = 0;
         combo = maxCombo = score = 0;
         life = 100;
@@ -1128,6 +1307,24 @@ public class BeatView extends View {
                 holdByBezel = false;
             }
             judge(best, t - best.time, false);
+            return;
+        }
+        // 폭탄을 눌렀는지
+        List<Note> ns = song.notes;
+        for (int i = nextIdx; i < ns.size(); i++) {
+            Note n = ns.get(i);
+            if (n.time > t + W_GREAT) break;
+            if (n.result >= 0 || n.trick != Note.TR_BOMB || Math.abs(n.time - t) > W_GREAT) continue;
+            double ang = Math.toRadians(n.angle);
+            float bx = (float) (cx + Math.cos(ang) * R), by = (float) (cy + Math.sin(ang) * R);
+            buzz(90);
+            miss(n);
+            if (screen == S_PLAY) {
+                judgeText = "펑!";
+                burst(bx, by, Color.rgb(255, 60, 40));
+                burst(bx, by, Color.rgb(255, 200, 60));
+            }
+            return;
         }
     }
 
@@ -1165,7 +1362,7 @@ public class BeatView extends View {
         for (int i = nextIdx; i < ns.size(); i++) {
             Note n = ns.get(i);
             if (n.time > t + w) break;
-            if (n.result >= 0) continue;
+            if (n.result >= 0 || n.trick == Note.TR_BOMB) continue;
             boolean ok = n.type == type || (type == Note.TAP && n.type == Note.HOLD);
             if (!ok) continue;
             double d = Math.abs(n.time - t);
@@ -1585,6 +1782,16 @@ public class BeatView extends View {
                 nextIdx++;
                 continue;
             }
+            if (n.trick == Note.TR_BOMB) {
+                if (playT > n.time + W_GREAT) {          // 폭탄을 잘 피했음
+                    n.result = R_PERFECT;
+                    counts[R_PERFECT]++;
+                    score += 100;
+                    nextIdx++;
+                    continue;
+                }
+                break;
+            }
             if (playT > n.time + win(n.type)) {
                 miss(n);
                 if (screen != S_PLAY) return;
@@ -1637,24 +1844,36 @@ public class BeatView extends View {
                 continue;
             }
             if (n.result >= 0) continue;
-            float prog = (float) (1 - (n.time - t) / ap);
-            if (prog < 0) continue;
+            float lin = (float) (1 - (n.time - t) / ap);
+            if (lin < 0) continue;
+            float na = trickAlpha(n.trick, lin);
+            if (na <= 0.01f) continue;
+            float prog = trickProg(n.trick, lin);
             float rr = R * prog;
             if (n.type == Note.TAP) {
-                double a = Math.toRadians(n.angle);
+                double a = Math.toRadians(trickAngle(n, lin, t));
                 float x = cx + (float) Math.cos(a) * rr, y = cy + (float) Math.sin(a) * rr;
                 float size = W * 0.045f * (0.45f + 0.55f * Math.min(1f, prog));
-                glow(c, x, y, size * 2.2f, alpha(col, 120));
-                p.setColor(col);
+                if (n.trick == Note.TR_BOMB) {
+                    drawBomb(c, x, y, size, na, t);
+                    continue;
+                }
+                glow(c, x, y, size * 2.2f, alpha(col, (int) (120 * na)));
+                p.setColor(alpha(col, (int) (255 * na)));
                 c.drawCircle(x, y, size, p);
-                p.setColor(Color.WHITE);
+                p.setColor(alpha(Color.WHITE, (int) (255 * na)));
                 c.drawCircle(x, y, size * 0.55f, p);
+                if (n.trick != Note.TR_NONE) {          // 트릭 표시: 작은 테두리
+                    stroke.setStrokeWidth(W * 0.006f);
+                    stroke.setColor(alpha(trickColor(n.trick), (int) (230 * na)));
+                    c.drawCircle(x, y, size * 1.35f, stroke);
+                }
             } else {
                 int sc = spinColor(n.dir);
-                stroke.setColor(alpha(sc, (int) (120 + 135 * Math.min(1f, prog))));
+                stroke.setColor(alpha(sc, (int) ((120 + 135 * Math.min(1f, prog)) * na)));
                 stroke.setStrokeWidth(W * 0.022f);
                 c.drawCircle(cx, cy, rr, stroke);
-                drawArrows(c, rr, n.dir, sc, t);
+                drawArrows(c, rr, n.dir, alpha(sc, (int) (255 * na)), t);
             }
         }
 
@@ -1706,33 +1925,100 @@ public class BeatView extends View {
             text.setColor(Color.LTGRAY);
             c.drawText("점: 탭 · 링: 베젤", cx, cy + W * 0.17f, text);
             c.drawText("줄: 누르고 있기 / 베젤 계속 돌리기", cx, cy + W * 0.23f, text);
+            if (hasBombs) {
+                text.setColor(Color.rgb(255, 110, 90));
+                c.drawText("빨간 ✕ 폭탄은 누르지 마세요!", cx, cy + W * 0.29f, text);
+            }
         }
+    }
+
+    // ---------- 트릭 ----------
+
+    /** 트릭에 따른 진행도 (0 = 가운데, 1 = 판정 링) */
+    private static float trickProg(int trick, float lin) {
+        if (trick == Note.TR_ACCEL) return lin < 1 ? lin * lin : lin;
+        if (trick == Note.TR_DECEL) return lin < 1 ? 1 - (1 - lin) * (1 - lin) : lin;
+        return lin;
+    }
+
+    /** 트릭에 따른 투명도 (숨김: 중간에 사라짐, 깜짝: 늦게 나타남) */
+    private static float trickAlpha(int trick, float lin) {
+        if (trick == Note.TR_HIDDEN) return lin < 0.4f ? 1f : Math.max(0f, 1f - (lin - 0.4f) / 0.22f);
+        if (trick == Note.TR_SUDDEN) return lin < 0.55f ? 0f : Math.min(1f, (lin - 0.55f) / 0.12f);
+        return 1f;
+    }
+
+    /** 트릭에 따른 각도 (회오리: 돌면서 다가옴, 흔들: 좌우로 흔들림). 링에 닿을 땐 원래 각도. */
+    private static double trickAngle(Note n, float lin, double t) {
+        float k = 1 - Math.max(0f, Math.min(1f, lin));
+        if (n.trick == Note.TR_SPIRAL) return n.angle + k * 240;
+        if (n.trick == Note.TR_WOBBLE) return n.angle + Math.sin(t * 9 + n.time * 3) * 30 * k;
+        return n.angle;
+    }
+
+    private static int trickColor(int trick) {
+        switch (trick) {
+            case Note.TR_HIDDEN: return Color.rgb(160, 160, 200);
+            case Note.TR_SUDDEN: return Color.rgb(255, 240, 120);
+            case Note.TR_ACCEL: return Color.rgb(255, 120, 80);
+            case Note.TR_DECEL: return Color.rgb(100, 180, 255);
+            case Note.TR_SPIRAL: return Color.rgb(200, 120, 255);
+            case Note.TR_WOBBLE: return Color.rgb(120, 255, 200);
+            case Note.TR_BOMB: return Color.rgb(255, 60, 50);
+            default: return Color.WHITE;
+        }
+    }
+
+    /** 폭탄: 누르면 안 되는 빨간 가시 공 */
+    private void drawBomb(Canvas c, float x, float y, float size, float na, double t) {
+        float pulse = 0.85f + 0.15f * (float) Math.sin(t * 20);
+        glow(c, x, y, size * 2.4f, alpha(Color.rgb(255, 40, 30), (int) (140 * na)));
+        stroke.setStrokeWidth(W * 0.008f);
+        stroke.setColor(alpha(Color.rgb(255, 90, 60), (int) (255 * na)));
+        for (int i = 0; i < 8; i++) {
+            double a = i * Math.PI / 4 + t * 2;
+            float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
+            c.drawLine(x + ca * size * 0.8f, y + sa * size * 0.8f, x + ca * size * 1.45f * pulse, y + sa * size * 1.45f * pulse, stroke);
+        }
+        p.setColor(alpha(Color.rgb(70, 10, 15), (int) (255 * na)));
+        c.drawCircle(x, y, size, p);
+        stroke.setStrokeWidth(W * 0.009f);
+        stroke.setColor(alpha(Color.rgb(255, 70, 60), (int) (255 * na)));
+        float d = size * 0.45f;
+        c.drawLine(x - d, y - d, x + d, y + d, stroke);
+        c.drawLine(x - d, y + d, x + d, y - d, stroke);
     }
 
     /** 줄(롱노트): 머리부터 꼬리까지 이어진 굵은 선. 누르고 있으면 머리가 링에 고정. */
     private void drawHold(Canvas c, Note n, double t, double ap, int col, boolean active) {
-        float pHead = active ? 1f : (float) (1 - (n.time - t) / ap);
-        float pTail = (float) (1 - (n.end - t) / ap);
-        if (pHead < 0) return;
+        float linHead = (float) (1 - (n.time - t) / ap);
+        float linTail = (float) (1 - (n.end - t) / ap);
+        if (!active && linHead < 0) return;
+        float na = active ? 1f : trickAlpha(n.trick, linHead);
+        if (na <= 0.01f) return;
+        col = alpha(col, (int) (255 * na));
+        float pHead = active ? 1f : trickProg(n.trick, linHead);
+        float pTail = linTail < 0 ? 0f : trickProg(n.trick, linTail);
         pHead = Math.min(pHead, 1.05f);
         pTail = Math.max(0f, Math.min(pTail, pHead));
-        double a = Math.toRadians(n.angle);
+        double a = Math.toRadians(active ? n.angle : trickAngle(n, linHead, t));
+        double at = Math.toRadians(trickAngle(n, Math.max(0f, linTail), t));
         float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
         float hx = cx + ca * R * pHead, hy = cy + sa * R * pHead;
-        float tx = cx + ca * R * pTail, ty = cy + sa * R * pTail;
+        float tx = cx + (float) Math.cos(at) * R * pTail, ty = cy + (float) Math.sin(at) * R * pTail;
         float width = W * 0.07f * (0.5f + 0.5f * Math.min(1f, pHead));
         stroke.setStrokeWidth(width * 1.5f);
-        stroke.setColor(alpha(col, active ? 110 : 60));
+        stroke.setColor(alpha(col, (int) ((active ? 110 : 60) * na)));
         c.drawLine(hx, hy, tx, ty, stroke);
         stroke.setStrokeWidth(width);
-        stroke.setColor(alpha(col, active ? 255 : 190));
+        stroke.setColor(alpha(col, (int) ((active ? 255 : 190) * na)));
         c.drawLine(hx, hy, tx, ty, stroke);
         stroke.setStrokeWidth(width * 0.35f);
-        stroke.setColor(alpha(Color.WHITE, active ? 230 : 150));
+        stroke.setColor(alpha(Color.WHITE, (int) ((active ? 230 : 150) * na)));
         c.drawLine(hx, hy, tx, ty, stroke);
         float size = W * 0.05f * (0.5f + 0.5f * Math.min(1f, pHead));
-        glow(c, hx, hy, size * (active ? 3f : 2.2f), alpha(col, active ? 200 : 120));
-        p.setColor(Color.WHITE);
+        glow(c, hx, hy, size * (active ? 3f : 2.2f), alpha(col, (int) ((active ? 200 : 120) * na)));
+        p.setColor(alpha(Color.WHITE, (int) (255 * na)));
         c.drawCircle(hx, hy, size * 0.75f, p);
         p.setColor(col);
         c.drawCircle(tx, ty, size * 0.45f, p);
@@ -1896,6 +2182,18 @@ public class BeatView extends View {
                 p.setColor(Color.WHITE);
                 c.drawCircle(x, ny, W * 0.014f, p);
             }
+            int tr = n.length > 5 ? (int) n[5] : 0;
+            if (tr == Note.TR_BOMB) {
+                p.setColor(Color.rgb(70, 10, 15));
+                c.drawCircle(x, ny, W * 0.03f, p);
+                text.setTextSize(W * 0.04f);
+                text.setColor(Color.rgb(255, 80, 60));
+                c.drawText("✕", x, ny + W * 0.014f, text);
+            } else if (tr > 0) {
+                text.setTextSize(W * 0.03f);
+                text.setColor(trickColor(tr));
+                c.drawText(TRICK_SHORT[tr], x, ny + W * (type == Note.SPIN ? -0.045f : 0.065f), text);
+            }
             if (sel) {
                 stroke.setStrokeWidth(W * 0.008f);
                 stroke.setColor(Color.rgb(255, 230, 120));
@@ -1933,44 +2231,57 @@ public class BeatView extends View {
         c.drawText(String.format("%d:%05.2f", (int) rel / 60, rel % 60) + " · " + bar + "마디 · 노트 " + cm.notes.size(), cx, H * 0.27f, text);
         text.setTextSize(W * 0.04f);
         text.setColor(Color.rgb(255, 230, 120));
-        c.drawText(edPlayer != null ? "재생 중 · 탭하면 멈춤" : edInfo, cx, H * 0.74f, text);
+        c.drawText(edPlayer != null ? "재생 중 · 탭하면 멈춤" : edInfo, cx, H * 0.725f, text);
         // 아래 버튼 줄
-        String[] labels = {GRID_NAMES[edGrid], "길이", "각도", "⇅"};
-        boolean[] on = {true, edSel != null && (int) edSel[2] == Note.HOLD, edSel != null && (int) edSel[2] != Note.SPIN, notesAtEd().size() > 1};
-        for (int k = 0; k < 4; k++) {
-            float bx = cx - W * 0.27f + k * W * 0.18f, by = H * 0.85f;
+        int selTr = edSel != null ? (int) edSel[5] : 0;
+        String[] labels = {GRID_NAMES[edGrid], "길이", "각도", selTr > 0 ? Note.TRICK_NAMES[selTr] : "트릭", "⇅"};
+        boolean[] on = {true, edSel != null && (int) edSel[2] == Note.HOLD, edSel != null && (int) edSel[2] != Note.SPIN,
+                edSel != null, notesAtEd().size() > 1};
+        for (int k = 0; k < 5; k++) {
+            float bx = cx - W * 0.30f + k * W * 0.15f, by = H * 0.83f;
             p.setColor(Color.argb(190, 20, 20, 30));
-            c.drawCircle(bx, by, W * 0.06f, p);
+            c.drawCircle(bx, by, W * 0.055f, p);
             stroke.setStrokeWidth(W * 0.005f);
-            boolean act = k == 2 && edAngleMode;
-            stroke.setColor(act ? Color.rgb(255, 230, 120) : on[k] ? col : Color.argb(70, 255, 255, 255));
-            c.drawCircle(bx, by, W * 0.06f, stroke);
-            text.setTextSize(W * (labels[k].length() > 2 ? 0.032f : 0.04f));
+            boolean act = (k == 2 && edAngleMode) || (k == 3 && selTr > 0);
+            stroke.setColor(k == 3 && selTr > 0 ? trickColor(selTr) : act ? Color.rgb(255, 230, 120) : on[k] ? col : Color.argb(70, 255, 255, 255));
+            c.drawCircle(bx, by, W * 0.055f, stroke);
+            text.setTextSize(W * (labels[k].length() > 2 ? 0.028f : 0.036f));
             text.setColor(on[k] ? Color.WHITE : Color.GRAY);
-            c.drawText(labels[k], bx, by + W * 0.013f, text);
+            c.drawText(labels[k], bx, by + W * 0.012f, text);
         }
         text.setTextSize(W * 0.03f);
         text.setColor(Color.GRAY);
-        c.drawText("베젤: 이동 · 길게: 삭제", cx, H * 0.95f, text);
+        c.drawText("베젤: 이동 · 길게: 삭제 · 가운데: 추가", cx, H * 0.94f, text);
         // 노트 고르기 창
-        if (edPicker) {
-            p.setColor(Color.argb(200, 5, 5, 12));
+        if (edPicker || edPatterns) {
+            p.setColor(Color.argb(205, 5, 5, 12));
             c.drawRect(0, 0, W, H, p);
-            int[] pc = {col, col, C_CW, C_CCW, C_ANY};
-            for (int k = 0; k < 5; k++) {
-                float[] pp = pickPos(k);
+            String[] names = edPatterns ? PATTERN_NAMES : PICK_NAMES;
+            int[] pc = edPatterns
+                    ? new int[]{col, Color.rgb(120, 220, 255), Color.rgb(255, 160, 220), C_CW, Color.rgb(255, 80, 60), Color.rgb(200, 120, 255)}
+                    : new int[]{col, col, C_CW, C_CCW, C_ANY, Color.rgb(255, 215, 60)};
+            for (int k = 0; k < names.length; k++) {
+                float[] pp = pickPos(k, names.length);
                 p.setColor(alpha(pc[k], 70));
-                c.drawCircle(pp[0], pp[1], W * 0.095f, p);
+                c.drawCircle(pp[0], pp[1], W * 0.088f, p);
                 stroke.setStrokeWidth(W * 0.008f);
                 stroke.setColor(pc[k]);
-                c.drawCircle(pp[0], pp[1], W * 0.095f, stroke);
-                text.setTextSize(W * (PICK_NAMES[k].length() > 3 ? 0.036f : 0.045f));
+                c.drawCircle(pp[0], pp[1], W * 0.088f, stroke);
+                text.setTextSize(W * (names[k].length() > 3 ? 0.032f : 0.04f));
                 text.setColor(Color.WHITE);
-                c.drawText(PICK_NAMES[k], pp[0], pp[1] + W * 0.015f, text);
+                c.drawText(names[k], pp[0], pp[1] + W * 0.013f, text);
             }
-            text.setTextSize(W * 0.04f);
-            text.setColor(Color.LTGRAY);
-            c.drawText("추가할 노트", cx, cy + W * 0.015f, text);
+            // 가운데: 되돌리기 / 앞 마디 복사
+            boolean can = edPatterns || !edUndo.isEmpty();
+            p.setColor(Color.argb(200, 30, 30, 45));
+            c.drawCircle(cx, cy, W * 0.1f, p);
+            stroke.setStrokeWidth(W * 0.006f);
+            stroke.setColor(can ? Color.rgb(255, 230, 120) : Color.argb(70, 255, 255, 255));
+            c.drawCircle(cx, cy, W * 0.1f, stroke);
+            text.setTextSize(W * 0.034f);
+            text.setColor(can ? Color.WHITE : Color.GRAY);
+            c.drawText(edPatterns ? "앞 마디" : "↶", cx, cy - W * 0.006f, text);
+            c.drawText(edPatterns ? "복사" : "되돌리기", cx, cy + W * 0.036f, text);
         }
     }
 
