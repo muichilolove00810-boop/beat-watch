@@ -110,6 +110,11 @@ public class BeatView extends View {
     private final SharedPreferences prefs;
     private final Vibrator vibrator;
     private Shader glowShader;
+    // 테마 배경
+    private final ThemeBg themeBg = new ThemeBg();
+    private int bgFx; // 0 켜기, 1 약하게, 2 끄기
+    private MapCode bgFor;
+    private int bgId;
 
     Updater updater;
 
@@ -191,6 +196,7 @@ public class BeatView extends View {
         prefs = ctx.getSharedPreferences("beat", Context.MODE_PRIVATE);
         vibrator = ctx.getSystemService(Vibrator.class);
         syncMs = prefs.getInt("sync", 0);
+        bgFx = Math.max(0, Math.min(2, prefs.getInt("bg_fx", 0)));
         text.setTextAlign(Paint.Align.CENTER);
         text.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
         mono.setTextAlign(Paint.Align.CENTER);
@@ -204,24 +210,16 @@ public class BeatView extends View {
         if (!menuStack.isEmpty()) return; // 하위 메뉴에 있을 때는 유지
         items = new ArrayList<>();
         menuTitle = "BEAT WATCH";
-        addPreset("네온 러시", new MapCode(0, 124, 0, 1, 9, true, 11));
-        addPreset("선셋 드라이브", new MapCode(2, 100, 0, 1, 6, true, 202));
-        addPreset("픽셀 하트", new MapCode(5, 150, 1, 1, 0, false, 55));
-        addPreset("사이버 펄스", new MapCode(1, 132, 1, 2, 2, true, 3303));
-        addPreset("스타게이트", new MapCode(3, 138, 1, 2, 7, true, 404));
-        addPreset("썬더 브레이크", new MapCode(4, 172, 2, 2, 4, true, 6006));
-        addPreset("글리치 스톰", new MapCode(7, 150, 2, 2, 11, false, 707));
-        addPreset("지옥의 문", new MapCode(6, 140, 3, 3, 5, true, 8080));
-        addPreset("레이저 하우스", new MapCode(0, 126, 1, 1, 4, false, 1212));
-        addPreset("밤의 고속도로", new MapCode(2, 108, 1, 2, 9, true, 2424));
-        addPreset("얼음 궁전", new MapCode(3, 140, 2, 2, 1, true, 3636));
-        addPreset("8비트 모험", new MapCode(5, 160, 2, 1, 7, false, 4848));
-        addPreset("폭풍 베이스", new MapCode(6, 144, 2, 2, 10, true, 5050));
+        for (int i = 0; i < ThemeBg.PRESETS.length; i++) addPreset(ThemeBg.PRESET_NAMES[i], ThemeBg.PRESETS[i]);
         items.add(new Item("내 맵", "직접 만들기 · 녹음 · 편집", this::openMyMaps));
         items.add(new Item("저장한 맵", "불러온 맵 모음 · " + savedMaps().size() + "개", this::openSaved));
         items.add(new Item("랜덤 맵", "새 음악 + 새 코드 만들기", null, 1));
         items.add(new Item("코드 입력", "폰/친구가 만든 맵 플레이", null, 2));
         items.add(new Item("싱크 조절", "현재 " + fmtMs(syncMs), null, 3));
+        items.add(new Item("배경 효과", new Adj() {
+            public String value() { return ThemeBg.FX_NAMES[bgFx]; }
+            public void adjust(int d) { bgFx = Math.floorMod(bgFx + d, 3); prefs.edit().putInt("bg_fx", bgFx).apply(); }
+        }));
     }
 
     private void addPreset(String name, MapCode m) {
@@ -240,6 +238,7 @@ public class BeatView extends View {
         cy = h / 2f;
         R = w * 0.43f;
         glowShader = new RadialGradient(0, 0, 1, Color.WHITE, Color.TRANSPARENT, Shader.TileMode.CLAMP);
+        themeBg.resize(w, h, R);
     }
 
     void resume() {
@@ -1665,8 +1664,20 @@ public class BeatView extends View {
         }
     }
 
+    /** 현재 맵의 배경 번호 (맵이 바뀔 때만 다시 계산) */
+    private int themeId() {
+        if (bgFor != cur) {
+            bgFor = cur;
+            bgId = ThemeBg.idFor(cur);
+        }
+        return bgId;
+    }
+
     private void drawDetail(Canvas c) {
         int col = STYLE_COLOR[cur.style];
+        // 배경 미리보기: 박자는 맵 BPM으로 흉내, 은은하게
+        double tm = SystemClock.uptimeMillis() / 1000.0;
+        themeBg.draw(c, themeId(), tm, tm * cur.bpm / 60.0, 0.6f, ThemeBg.FX_AMT[bgFx] * 0.45f);
         drawBackdrop(c, col);
         text.setColor(Color.WHITE);
         text.setTextSize(W * 0.09f);
@@ -1849,6 +1860,8 @@ public class BeatView extends View {
         float frac = beats >= 0 ? (float) (beats - Math.floor(beats)) : 0.5f;
         float pulse = (float) Math.exp(-frac * 5) * energy;
 
+        // 테마 배경 (맵 전용 / 장르별)
+        themeBg.draw(c, themeId(), t, beats, energy, ThemeBg.FX_AMT[bgFx]);
         // 배경 펄스
         glow(c, cx, cy, W * (0.35f + 0.2f * pulse), alpha(col, (int) (40 + 110 * pulse)));
         // 비주얼라이저 링
