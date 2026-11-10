@@ -42,6 +42,7 @@
 > Task :core:extractDeepLinksForAarRelease UP-TO-DATE
 > Task :core:extractReleaseAnnotations UP-TO-DATE
 > Task :core:mergeReleaseGeneratedProguardFiles UP-TO-DATE
+> Task :wear:processReleaseManifestForPackage
 > Task :core:mergeReleaseConsumerProguardFiles UP-TO-DATE
 > Task :core:mergeReleaseShaders UP-TO-DATE
 > Task :core:compileReleaseShaders NO-SOURCE
@@ -51,7 +52,6 @@
 > Task :core:mergeReleaseJavaResource UP-TO-DATE
 > Task :core:syncReleaseLibJars UP-TO-DATE
 > Task :core:bundleReleaseLocalLintAar UP-TO-DATE
-> Task :wear:processReleaseManifestForPackage
 > Task :core:writeReleaseLintModelMetadata UP-TO-DATE
 > Task :core:copyReleaseJniLibsProjectOnly UP-TO-DATE
 > Task :wear:mergeReleaseJniLibFolders UP-TO-DATE
@@ -109,12 +109,12 @@
 > Task :phone:mergeReleaseAssets UP-TO-DATE
 > Task :phone:compressReleaseAssets UP-TO-DATE
 > Task :phone:extractReleaseVersionControlInfo
+> Task :phone:processReleaseManifestForPackage
 > Task :phone:processReleaseJavaRes NO-SOURCE
 > Task :phone:mergeReleaseJavaResource UP-TO-DATE
 > Task :phone:collectReleaseDependencies UP-TO-DATE
 > Task :phone:sdkReleaseDependencyData UP-TO-DATE
 > Task :phone:validateSigningRelease UP-TO-DATE
-> Task :phone:processReleaseManifestForPackage
 > Task :phone:writeReleaseAppMetadata UP-TO-DATE
 > Task :phone:writeReleaseSigningConfigVersions UP-TO-DATE
 > Task :wear:processReleaseResources
@@ -138,8 +138,8 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :phone:generateReleaseLintVitalReportModel
 > Task :phone:dexBuilderRelease UP-TO-DATE
 > Task :phone:mergeDexRelease UP-TO-DATE
-> Task :phone:mergeReleaseGlobalSynthetics UP-TO-DATE
 > Task :wear:mergeDexRelease
+> Task :phone:mergeReleaseGlobalSynthetics UP-TO-DATE
 > Task :wear:compileReleaseArtProfile
 > Task :phone:compileReleaseArtProfile UP-TO-DATE
 > Task :wear:optimizeReleaseResources
@@ -157,7 +157,7 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :wear:lintVitalRelease
 > Task :wear:assembleRelease
 
-BUILD SUCCESSFUL in 4s
+BUILD SUCCESSFUL in 7s
 120 actionable tasks: 28 executed, 92 up-to-date
-https://github.com/muichilolove00810-boop/beat-watch/releases/tag/v1.5
-배포 완료: v1.5 (versionCode 7)
+https://github.com/muichilolove00810-boop/beat-watch/releases/tag/v1.6
+배포 완료: v1.6 (versionCode 8)
