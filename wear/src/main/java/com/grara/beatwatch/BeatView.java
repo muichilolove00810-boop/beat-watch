@@ -217,6 +217,7 @@ public class BeatView extends View {
         addPreset("8비트 모험", new MapCode(5, 160, 2, 1, 7, false, 4848));
         addPreset("폭풍 베이스", new MapCode(6, 144, 2, 2, 10, true, 5050));
         items.add(new Item("내 맵", "직접 만들기 · 녹음 · 편집", this::openMyMaps));
+        items.add(new Item("저장한 맵", "불러온 맵 모음 · " + savedMaps().size() + "개", this::openSaved));
         items.add(new Item("랜덤 맵", "새 음악 + 새 코드 만들기", null, 1));
         items.add(new Item("코드 입력", "폰/친구가 만든 맵 플레이", null, 2));
         items.add(new Item("싱크 조절", "현재 " + fmtMs(syncMs), null, 3));
@@ -331,11 +332,7 @@ public class BeatView extends View {
                 tick();
                 break;
             case S_EDIT:
-                if (edPlayer == null) {
-                    double g = curCustom.beat() / 4;
-                    edT = Math.max(0, Song.LEAD_IN + Math.round((edT - Song.LEAD_IN) / g + dir) * g);
-                    updateEdInfo();
-                }
+                edRotary(dir);
                 break;
             case S_CODE:
                 codeIdx[codeSlot] = Math.floorMod(codeIdx[codeSlot] + dir, 32);
@@ -444,6 +441,10 @@ public class BeatView extends View {
                 break;
             }
             case S_DETAIL:
+                if (Math.abs(y - H * 0.705f) < H * 0.045f && Math.abs(x - cx) < W * 0.3f) {
+                    toggleSaved(cur, curTitle);
+                    break;
+                }
                 startLoading();
                 break;
             case S_EDIT:
@@ -551,6 +552,68 @@ public class BeatView extends View {
     }
 
     // =================== 내 맵 메뉴 ===================
+
+    // =================== 저장한 맵 ===================
+
+    private ArrayList<String[]> savedMaps() {
+        ArrayList<String[]> out = new ArrayList<>();
+        try {
+            org.json.JSONArray a = new org.json.JSONArray(prefs.getString("saved_maps", "[]"));
+            for (int i = 0; i < a.length(); i++) {
+                org.json.JSONArray e = a.getJSONArray(i);
+                out.add(new String[]{e.getString(0), e.getString(1)});
+            }
+        } catch (Exception ignored) {
+        }
+        return out;
+    }
+
+    private void writeSavedMaps(ArrayList<String[]> list) {
+        org.json.JSONArray a = new org.json.JSONArray();
+        for (String[] e : list) a.put(new org.json.JSONArray().put(e[0]).put(e[1]));
+        prefs.edit().putString("saved_maps", a.toString()).apply();
+    }
+
+    private boolean isSaved(String code) {
+        for (String[] e : savedMaps()) if (e[0].equals(code)) return true;
+        return false;
+    }
+
+    private void toggleSaved(MapCode m, String title) {
+        ArrayList<String[]> list = savedMaps();
+        String code = m.code();
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i)[0].equals(code)) {
+                list.remove(i);
+                writeSavedMaps(list);
+                buzz(20);
+                if ("저장한 맵".equals(menuTitle)) items = savedItems();
+                return;
+            }
+        }
+        String name = (title.equals("랜덤 맵") || title.equals("코드 맵")) ? title + " " + code.substring(0, 4) : title;
+        list.add(0, new String[]{code, name});
+        writeSavedMaps(list);
+        buzz(30);
+        if ("저장한 맵".equals(menuTitle)) items = savedItems();
+    }
+
+    private ArrayList<Item> savedItems() {
+        ArrayList<Item> its = new ArrayList<>();
+        for (String[] e : savedMaps()) {
+            final MapCode m = MapCode.parse(e[0]);
+            if (m == null) continue;
+            final String name = e[1];
+            float b = prefs.getFloat("best_" + m.code(), -1);
+            its.add(new Item(name, m.summary() + (b >= 0 ? "  " + rank(b, false) : ""), () -> openMap(m, name)));
+        }
+        if (its.isEmpty()) its.add(new Item("비어 있어요", "맵 화면에서 ☆ 저장하기를 눌러요", null));
+        return its;
+    }
+
+    private void openSaved() {
+        pushMenu("저장한 맵", savedItems());
+    }
 
     private void pushMenu(String title, ArrayList<Item> its) {
         menuStack.add(new MenuState(items, menuSel, menuTitle));
@@ -758,7 +821,7 @@ public class BeatView extends View {
             if (Math.abs(cm.notes.get(i)[0] - st) < 0.04) cm.notes.remove(i);
         }
         double en = type == Note.HOLD ? Math.max(st + cm.beat() / 2, cm.snap(end)) : st;
-        cm.notes.add(new double[]{st, en, type, dir});
+        cm.notes.add(new double[]{st, en, type, dir, -1});
         recCount++;
         recFlash = 1f;
         recLast = type == Note.HOLD ? "줄" : type == Note.SPIN ? (dir > 0 ? "베젤 ↻" : "베젤 ↺") : "탭";
@@ -800,6 +863,9 @@ public class BeatView extends View {
         curCustom = cm;
         loadCustomSong(cm, () -> {
             edT = Song.LEAD_IN;
+            edSel = null;
+            edPicker = false;
+            edAngleMode = false;
             screen = S_EDIT;
             updateEdInfo();
         });
@@ -812,18 +878,56 @@ public class BeatView extends View {
         }
     }
 
-    private double[] noteAtEd() {
-        double g = curCustom.beat() / 4;
-        double[] best = null;
-        double bd = g / 2;
-        for (double[] n : curCustom.notes) {
-            double d = Math.abs(n[0] - edT);
-            if (d <= bd) {
-                bd = d;
-                best = n;
-            }
+    private static final String[] GRID_NAMES = {"1박", "1/8", "1/16", "1/32", "자유"};
+    private static final String[] PICK_NAMES = {"탭", "줄", "베젤↻", "베젤↺", "베젤 아무"};
+    private int edGrid = 2;
+    private double[] edSel;
+    private boolean edPicker, edAngleMode;
+
+    private double edStep() {
+        double b = curCustom.beat();
+        switch (edGrid) {
+            case 0: return b;
+            case 1: return b / 2;
+            case 2: return b / 4;
+            case 3: return b / 8;
+            default: return 0.01;
         }
-        return best;
+    }
+
+    private void edRotary(int dir) {
+        if (edPlayer != null || edPicker) return;
+        if (edAngleMode && edSel != null && (int) edSel[2] != Note.SPIN) {
+            edSel[4] = Math.floorMod((int) Math.round(edAngle(edSel)) + dir * 15, 360);
+            saveCustoms();
+            updateEdInfo();
+            return;
+        }
+        double g = edStep();
+        if (edGrid == 4) edT = Math.max(0, edT + dir * g);
+        else edT = Math.max(0, Song.LEAD_IN + Math.round((edT - Song.LEAD_IN) / g + dir) * g);
+        edSel = null;
+        edAngleMode = false;
+        updateEdInfo();
+    }
+
+    private ArrayList<double[]> notesAtEd() {
+        double tol = edGrid == 4 ? 0.02 : Math.min(edStep() / 2, 0.06);
+        ArrayList<double[]> out = new ArrayList<>();
+        for (double[] n : curCustom.notes) if (Math.abs(n[0] - edT) <= tol) out.add(n);
+        return out;
+    }
+
+    private double[] noteAtEd() {
+        ArrayList<double[]> ns = notesAtEd();
+        if (edSel != null && ns.contains(edSel)) return edSel;
+        return ns.isEmpty() ? null : ns.get(0);
+    }
+
+    private double edAngle(double[] n) {
+        if (n.length > 4 && n[4] >= 0) return n[4];
+        double a = (((n[0] - Song.LEAD_IN) / curCustom.beat()) * 45.0 + 270) % 360;
+        return a < 0 ? a + 360 : a;
     }
 
     private static String typeName(double[] n) {
@@ -834,12 +938,65 @@ public class BeatView extends View {
     }
 
     private void updateEdInfo() {
-        double[] n = noteAtEd();
-        edInfo = n == null ? "빈 칸 · 탭: 노트 추가" : typeName(n) + " · 탭: 종류 바꾸기";
+        ArrayList<double[]> ns = notesAtEd();
+        if (edSel == null || !ns.contains(edSel)) edSel = ns.isEmpty() ? null : ns.get(0);
+        if (edSel == null) {
+            edInfo = "빈 칸 · 가운데 탭: 노트 추가";
+            edAngleMode = false;
+        } else {
+            edInfo = typeName(edSel) + (ns.size() > 1 ? " (" + (ns.indexOf(edSel) + 1) + "/" + ns.size() + ")" : "")
+                    + ((int) edSel[2] != Note.SPIN ? " · " + (int) edAngle(edSel) + "°" : "")
+                    + " · 탭: 겹쳐 추가";
+        }
+    }
+
+    private static float dist(float x1, float y1, float x2, float y2) {
+        return (float) Math.hypot(x1 - x2, y1 - y2);
+    }
+
+    private float[] pickPos(int k) {
+        double a = Math.toRadians(-90 + k * 72);
+        return new float[]{cx + (float) Math.cos(a) * W * 0.25f, cy + (float) Math.sin(a) * W * 0.25f};
+    }
+
+    private void edAddNote(int k) {
+        CustomMap cm = curCustom;
+        double[] n;
+        switch (k) {
+            case 0: n = new double[]{edT, edT, Note.TAP, 0, -1}; break;
+            case 1: n = new double[]{edT, edT + cm.beat(), Note.HOLD, 0, -1}; break;
+            case 2: n = new double[]{edT, edT, Note.SPIN, 1, -1}; break;
+            case 3: n = new double[]{edT, edT, Note.SPIN, -1, -1}; break;
+            default: n = new double[]{edT, edT, Note.SPIN, 0, -1};
+        }
+        for (double[] o : notesAtEd()) {
+            if ((int) o[2] == (int) n[2] && (int) o[3] == (int) n[3]) {
+                edSel = o;
+                updateEdInfo();
+                edInfo = "같은 노트가 이미 있어요";
+                return;
+            }
+        }
+        cm.notes.add(n);
+        edSel = n;
+        tick();
+        saveCustoms();
+        updateEdInfo();
     }
 
     private void edTap(float x, float y, boolean longPress) {
         CustomMap cm = curCustom;
+        if (edPicker) {
+            edPicker = false;
+            for (int k = 0; k < 5; k++) {
+                float[] pp = pickPos(k);
+                if (dist(x, y, pp[0], pp[1]) < W * 0.1f) {
+                    edAddNote(k);
+                    return;
+                }
+            }
+            return;
+        }
         if (y < H * 0.24f && Math.abs(x - cx) < W * 0.22f) {
             if (edPlayer != null) {
                 stopEdPlayer();
@@ -851,13 +1008,53 @@ public class BeatView extends View {
         }
         if (edPlayer != null) {
             stopEdPlayer();
-            double g = cm.beat() / 4;
-            edT = Song.LEAD_IN + Math.round((edT - Song.LEAD_IN) / g) * g;
+            if (edGrid != 4) {
+                double g = edStep();
+                edT = Song.LEAD_IN + Math.round((edT - Song.LEAD_IN) / g) * g;
+            }
             updateEdInfo();
             return;
         }
+        // 아래 버튼 줄: 격자 / 길이 / 각도 / 겹친 노트 고르기
+        if (Math.abs(y - H * 0.85f) < W * 0.065f && Math.abs(x - cx) < W * 0.36f) {
+            int k = Math.max(0, Math.min(3, (int) Math.floor((x - (cx - W * 0.36f)) / (W * 0.18f))));
+            if (k == 0) {
+                edGrid = (edGrid + 1) % GRID_NAMES.length;
+                updateEdInfo();
+                edInfo = "격자: " + GRID_NAMES[edGrid];
+            } else if (k == 1) {
+                if (edSel != null && (int) edSel[2] == Note.HOLD) {
+                    double[] lens = {0.5, 1, 2, 3, 4, 6, 8};
+                    double curLen = (edSel[1] - edSel[0]) / cm.beat();
+                    int i = 0;
+                    while (i < lens.length && lens[i] <= curLen + 0.01) i++;
+                    edSel[1] = edSel[0] + lens[i % lens.length] * cm.beat();
+                    saveCustoms();
+                    updateEdInfo();
+                    edInfo = "줄 길이 " + lens[i % lens.length] + "박";
+                } else {
+                    edInfo = "줄 노트를 먼저 고르세요";
+                }
+            } else if (k == 2) {
+                if (edSel != null && (int) edSel[2] != Note.SPIN) {
+                    edAngleMode = !edAngleMode;
+                    if (edAngleMode && edSel[4] < 0) edSel[4] = Math.round(edAngle(edSel) / 15.0) * 15 % 360;
+                    updateEdInfo();
+                    edInfo = edAngleMode ? "베젤로 방향 돌리기 · " + (int) edAngle(edSel) + "°" : "방향 조절 끝";
+                } else {
+                    edInfo = "탭/줄 노트만 방향을 정해요";
+                }
+            } else {
+                ArrayList<double[]> ns = notesAtEd();
+                if (ns.size() > 1) {
+                    edSel = ns.get((ns.indexOf(edSel) + 1) % ns.size());
+                    edAngleMode = false;
+                }
+                updateEdInfo();
+            }
+            return;
+        }
         if (x < W * 0.2f || x > W * 0.8f) {
-            // 이전/다음 노트로 이동
             boolean next = x > cx;
             double bestT = next ? Double.MAX_VALUE : -1;
             for (double[] n : cm.notes) {
@@ -865,55 +1062,23 @@ public class BeatView extends View {
                 if (!next && n[0] < edT - 0.01 && n[0] > bestT) bestT = n[0];
             }
             if (bestT >= 0 && bestT < Double.MAX_VALUE) edT = bestT;
+            edSel = null;
+            edAngleMode = false;
             updateEdInfo();
             return;
         }
-        double[] n = noteAtEd();
-        if (y > H * 0.78f) {
-            // 줄 길이 바꾸기
-            if (n != null && (int) n[2] == Note.HOLD) {
-                double[] lens = {0.5, 1, 2, 3, 4};
-                double curLen = (n[1] - n[0]) / cm.beat();
-                int k = 0;
-                while (k < lens.length && lens[k] <= curLen + 0.01) k++;
-                n[1] = n[0] + lens[k % lens.length] * cm.beat();
-                edInfo = "줄 길이 " + lens[k % lens.length] + "박";
-                saveCustoms();
-            }
-            return;
-        }
         if (longPress) {
-            if (n != null) {
-                cm.notes.remove(n);
+            if (edSel != null) {
+                cm.notes.remove(edSel);
+                edSel = null;
+                edAngleMode = false;
                 buzz(30);
                 saveCustoms();
             }
             updateEdInfo();
             return;
         }
-        if (n == null) {
-            cm.notes.add(new double[]{edT, edT, Note.TAP, 0});
-        } else {
-            int type = (int) n[2], dir = (int) n[3];
-            if (type == Note.TAP) {
-                n[2] = Note.HOLD;
-                n[1] = n[0] + cm.beat();
-            } else if (type == Note.HOLD) {
-                n[2] = Note.SPIN;
-                n[3] = 0;
-                n[1] = n[0];
-            } else if (dir == 0) {
-                n[3] = 1;
-            } else if (dir == 1) {
-                n[3] = -1;
-            } else {
-                n[2] = Note.TAP;
-                n[3] = 0;
-            }
-        }
-        tick();
-        saveCustoms();
-        updateEdInfo();
+        edPicker = true;
     }
 
     private void startPlay() {
@@ -1286,15 +1451,22 @@ public class BeatView extends View {
         if (b >= 0) {
             text.setTextSize(W * 0.048f);
             text.setColor(rankColor(rank(b, false)));
-            c.drawText("최고 " + rank(b, false) + "  " + String.format("%.1f%%", b), cx, H * 0.68f, text);
+            c.drawText("최고 " + rank(b, false) + "  " + String.format("%.1f%%", b), cx, H * 0.645f, text);
         }
+        boolean saved = isSaved(cur.code());
+        p.setColor(saved ? Color.argb(90, 255, 210, 63) : Color.argb(60, 255, 255, 255));
+        r.set(cx - W * 0.2f, H * 0.67f, cx + W * 0.2f, H * 0.74f);
+        c.drawRoundRect(r, W * 0.05f, W * 0.05f, p);
+        text.setTextSize(W * 0.045f);
+        text.setColor(saved ? Color.rgb(255, 210, 63) : Color.WHITE);
+        c.drawText(saved ? "★ 저장됨" : "☆ 저장하기", cx, H * 0.72f, text);
         boolean on = (SystemClock.uptimeMillis() / 500) % 2 == 0;
-        text.setTextSize(W * 0.065f);
+        text.setTextSize(W * 0.06f);
         text.setColor(on ? Color.rgb(255, 230, 120) : Color.rgb(200, 170, 80));
-        c.drawText("탭해서 시작", cx, H * 0.79f, text);
-        text.setTextSize(W * 0.036f);
+        c.drawText("탭해서 시작", cx, H * 0.81f, text);
+        text.setTextSize(W * 0.034f);
         text.setColor(Color.GRAY);
-        c.drawText("오른쪽 스와이프: 뒤로", cx, H * 0.87f, text);
+        c.drawText("오른쪽 스와이프: 뒤로", cx, H * 0.88f, text);
     }
 
     private void drawCode(Canvas c) {
@@ -1694,37 +1866,57 @@ public class BeatView extends View {
                 c.drawText(String.valueOf(k / 16 + 1), x, laneY - H * 0.18f, text);
             }
         }
-        // 노트
+        // 노트 (세 줄: 위 베젤 / 가운데 탭 / 아래 줄)
         for (double[] n : cm.notes) {
             float x = cx + (float) ((n[0] - edT) * pps);
             float xe = cx + (float) ((n[1] - edT) * pps);
             if (xe < -30 || x > W + 30) continue;
             int type = (int) n[2], dir = (int) n[3];
+            boolean sel = n == edSel;
+            float ny;
             if (type == Note.HOLD) {
-                stroke.setStrokeWidth(W * 0.05f);
+                ny = laneY + H * 0.08f;
+                stroke.setStrokeWidth(W * 0.045f);
                 stroke.setColor(alpha(col, 200));
-                c.drawLine(x, laneY, xe, laneY, stroke);
+                c.drawLine(x, ny, xe, ny, stroke);
                 p.setColor(Color.WHITE);
-                c.drawCircle(x, laneY, W * 0.03f, p);
+                c.drawCircle(x, ny, W * 0.027f, p);
             } else if (type == Note.SPIN) {
+                ny = laneY - H * 0.09f;
                 stroke.setStrokeWidth(W * 0.014f);
                 stroke.setColor(spinColor(dir));
-                c.drawCircle(x, laneY - H * 0.09f, W * 0.035f, stroke);
+                c.drawCircle(x, ny, W * 0.033f, stroke);
                 text.setTextSize(W * 0.04f);
                 text.setColor(spinColor(dir));
-                c.drawText(dir > 0 ? "↻" : dir < 0 ? "↺" : "○", x, laneY - H * 0.075f, text);
+                c.drawText(dir > 0 ? "↻" : dir < 0 ? "↺" : "○", x, ny + W * 0.014f, text);
             } else {
+                ny = laneY;
                 p.setColor(col);
-                c.drawCircle(x, laneY, W * 0.03f, p);
+                c.drawCircle(x, ny, W * 0.03f, p);
                 p.setColor(Color.WHITE);
-                c.drawCircle(x, laneY, W * 0.014f, p);
+                c.drawCircle(x, ny, W * 0.014f, p);
+            }
+            if (sel) {
+                stroke.setStrokeWidth(W * 0.008f);
+                stroke.setColor(Color.rgb(255, 230, 120));
+                c.drawCircle(x, ny, W * 0.048f, stroke);
             }
         }
         // 재생 위치
         stroke.setStrokeWidth(W * 0.008f);
         stroke.setColor(Color.rgb(255, 230, 120));
         c.drawLine(cx, laneY - H * 0.2f, cx, laneY + H * 0.2f, stroke);
-        // 버튼 / 안내
+        // 선택 노트의 방향 (링 위 위치)
+        if (edSel != null && (int) edSel[2] != Note.SPIN) {
+            double a = Math.toRadians(edAngle(edSel));
+            float ro = W * 0.47f;
+            stroke.setStrokeWidth(W * 0.006f);
+            stroke.setColor(Color.argb(edAngleMode ? 120 : 50, 255, 255, 255));
+            c.drawCircle(cx, cy, ro, stroke);
+            p.setColor(edAngleMode ? Color.rgb(255, 230, 120) : col);
+            c.drawCircle(cx + (float) Math.cos(a) * ro, cy + (float) Math.sin(a) * ro, W * (edAngleMode ? 0.03f : 0.02f), p);
+        }
+        // 위: 재생 버튼 / 시간
         p.setColor(Color.argb(180, 20, 20, 30));
         c.drawCircle(cx, H * 0.13f, W * 0.075f, p);
         text.setTextSize(W * 0.06f);
@@ -1734,21 +1926,51 @@ public class BeatView extends View {
         text.setColor(Color.argb(170, 255, 255, 255));
         c.drawText("◀", W * 0.08f, cy + W * 0.025f, text);
         c.drawText("▶", W * 0.92f, cy + W * 0.025f, text);
-        int sec = (int) Math.max(0, edT - Song.LEAD_IN);
-        int bar = (int) Math.max(0, Math.floor((edT - Song.LEAD_IN) / (beat * 4))) + 1;
-        text.setTextSize(W * 0.04f);
+        double rel = Math.max(0, edT - Song.LEAD_IN);
+        int bar = (int) Math.floor(rel / (beat * 4)) + 1;
+        text.setTextSize(W * 0.038f);
         text.setColor(Color.WHITE);
-        c.drawText(sec / 60 + ":" + String.format("%02d", sec % 60) + " · " + bar + "마디 · 노트 " + cm.notes.size(), cx, H * 0.27f, text);
-        text.setTextSize(W * 0.042f);
+        c.drawText(String.format("%d:%05.2f", (int) rel / 60, rel % 60) + " · " + bar + "마디 · 노트 " + cm.notes.size(), cx, H * 0.27f, text);
+        text.setTextSize(W * 0.04f);
         text.setColor(Color.rgb(255, 230, 120));
-        c.drawText(edPlayer != null ? "재생 중 · 탭하면 멈춤" : edInfo, cx, H * 0.75f, text);
-        text.setTextSize(W * 0.034f);
+        c.drawText(edPlayer != null ? "재생 중 · 탭하면 멈춤" : edInfo, cx, H * 0.74f, text);
+        // 아래 버튼 줄
+        String[] labels = {GRID_NAMES[edGrid], "길이", "각도", "⇅"};
+        boolean[] on = {true, edSel != null && (int) edSel[2] == Note.HOLD, edSel != null && (int) edSel[2] != Note.SPIN, notesAtEd().size() > 1};
+        for (int k = 0; k < 4; k++) {
+            float bx = cx - W * 0.27f + k * W * 0.18f, by = H * 0.85f;
+            p.setColor(Color.argb(190, 20, 20, 30));
+            c.drawCircle(bx, by, W * 0.06f, p);
+            stroke.setStrokeWidth(W * 0.005f);
+            boolean act = k == 2 && edAngleMode;
+            stroke.setColor(act ? Color.rgb(255, 230, 120) : on[k] ? col : Color.argb(70, 255, 255, 255));
+            c.drawCircle(bx, by, W * 0.06f, stroke);
+            text.setTextSize(W * (labels[k].length() > 2 ? 0.032f : 0.04f));
+            text.setColor(on[k] ? Color.WHITE : Color.GRAY);
+            c.drawText(labels[k], bx, by + W * 0.013f, text);
+        }
+        text.setTextSize(W * 0.03f);
         text.setColor(Color.GRAY);
-        c.drawText("베젤: 이동 · 길게: 삭제", cx, H * 0.81f, text);
-        double[] n = noteAtEd();
-        if (n != null && (int) n[2] == Note.HOLD) {
-            text.setColor(Color.rgb(120, 220, 255));
-            c.drawText("아래 탭: 줄 길이", cx, H * 0.87f, text);
+        c.drawText("베젤: 이동 · 길게: 삭제", cx, H * 0.95f, text);
+        // 노트 고르기 창
+        if (edPicker) {
+            p.setColor(Color.argb(200, 5, 5, 12));
+            c.drawRect(0, 0, W, H, p);
+            int[] pc = {col, col, C_CW, C_CCW, C_ANY};
+            for (int k = 0; k < 5; k++) {
+                float[] pp = pickPos(k);
+                p.setColor(alpha(pc[k], 70));
+                c.drawCircle(pp[0], pp[1], W * 0.095f, p);
+                stroke.setStrokeWidth(W * 0.008f);
+                stroke.setColor(pc[k]);
+                c.drawCircle(pp[0], pp[1], W * 0.095f, stroke);
+                text.setTextSize(W * (PICK_NAMES[k].length() > 3 ? 0.036f : 0.045f));
+                text.setColor(Color.WHITE);
+                c.drawText(PICK_NAMES[k], pp[0], pp[1] + W * 0.015f, text);
+            }
+            text.setTextSize(W * 0.04f);
+            text.setColor(Color.LTGRAY);
+            c.drawText("추가할 노트", cx, cy + W * 0.015f, text);
         }
     }
 
