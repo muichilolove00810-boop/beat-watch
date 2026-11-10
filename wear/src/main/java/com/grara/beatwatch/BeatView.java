@@ -1302,6 +1302,10 @@ public class BeatView extends View {
         double t = songTimeAt(eventTime);
         Note best = findNote(t, Note.TAP, 0);
         if (best != null) {
+            if (tooEarly(best, t - best.time, false)) {
+                earlyMiss(best);
+                return;
+            }
             if (best.type == Note.HOLD) {
                 activeHold = best;
                 holdByBezel = false;
@@ -1337,12 +1341,20 @@ public class BeatView extends View {
         }
         Note best = findNote(t, Note.SPIN, dir);
         if (best != null) {
+            if (tooEarly(best, t - best.time, true)) {
+                earlyMiss(best);
+                return;
+            }
             judge(best, t - best.time, best.dir != 0 && best.dir != dir);
             return;
         }
         // 베젤로도 줄 노트를 시작할 수 있음
         best = findNote(t, Note.HOLD, 0);
         if (best != null) {
+            if (tooEarly(best, t - best.time, true)) {
+                earlyMiss(best);
+                return;
+            }
             activeHold = best;
             holdByBezel = true;
             lastBezelT = t;
@@ -1354,18 +1366,31 @@ public class BeatView extends View {
         return type == Note.TAP ? W_GOOD : W_GOOD * SPIN_MUL;
     }
 
+    /** 공이 닿기 전 이만큼(초) 일찍 누르면 '너무 빠름' 미스 (베젤은 SPIN_MUL 배) */
+    private static final double W_EARLY = 0.38;
+
+    /** 너무 일찍 눌렀는지: GREAT 범위보다 앞서 누름 */
+    private static boolean tooEarly(Note n, double off, boolean bezel) {
+        double mul = n.type == Note.SPIN || bezel ? SPIN_MUL : 1;
+        return off < -W_GREAT * mul;
+    }
+
     private Note findNote(double t, int type, int dir) {
         List<Note> ns = song.notes;
         Note best = null;
         double w = win(type);
-        double bd = w;
+        double early = W_EARLY * (type == Note.TAP ? 1 : SPIN_MUL);
+        double bd = Double.MAX_VALUE;
+        double greatW = W_GREAT * (type == Note.TAP ? 1 : SPIN_MUL);
         for (int i = nextIdx; i < ns.size(); i++) {
             Note n = ns.get(i);
-            if (n.time > t + w) break;
+            if (n.time > t + early) break;
+            if (n.time < t - w) continue;
             if (n.result >= 0 || n.trick == Note.TR_BOMB) continue;
             boolean ok = n.type == type || (type == Note.TAP && n.type == Note.HOLD);
             if (!ok) continue;
-            double d = Math.abs(n.time - t);
+            // 칠 수 있는 노트를 먼저, 너무 이른 노트는 다른 게 없을 때만
+            double d = Math.abs(n.time - t) + (t - n.time < -greatW ? 10 : 0);
             if (d <= bd) {
                 bd = d;
                 best = n;
@@ -1405,7 +1430,20 @@ public class BeatView extends View {
         }
     }
 
+    /** 공이 닿기 전에 눌러서 미스: 대미지는 일반 미스의 반 */
+    private void earlyMiss(Note n) {
+        missWith(n, 0.5f);
+        if (screen == S_PLAY) {
+            judgeText = "너무 빨라요!";
+            buzz(25);
+        }
+    }
+
     private void miss(Note n) {
+        missWith(n, 1f);
+    }
+
+    private void missWith(Note n, float dmgMul) {
         n.result = R_MISS;
         counts[R_MISS]++;
         if (n.type == Note.HOLD && n.tailResult < 0) {
@@ -1413,7 +1451,7 @@ public class BeatView extends View {
             counts[R_MISS]++;
         }
         combo = 0;
-        life -= cur.diff == 3 ? 14 : 10;
+        life -= Math.round((cur.diff == 3 ? 14 : 10) * dmgMul);
         judgeText = "MISS";
         judgeColor = Color.rgb(255, 70, 90);
         judgeT = 0.6f;
@@ -1853,7 +1891,7 @@ public class BeatView extends View {
             if (n.type == Note.TAP) {
                 double a = Math.toRadians(trickAngle(n, lin, t));
                 float x = cx + (float) Math.cos(a) * rr, y = cy + (float) Math.sin(a) * rr;
-                float size = W * 0.045f * (0.45f + 0.55f * Math.min(1f, prog));
+                float size = W * 0.068f * (0.45f + 0.55f * Math.min(1f, prog));
                 if (n.trick == Note.TR_BOMB) {
                     drawBomb(c, x, y, size, na, t);
                     continue;
@@ -1871,7 +1909,7 @@ public class BeatView extends View {
             } else {
                 int sc = spinColor(n.dir);
                 stroke.setColor(alpha(sc, (int) ((120 + 135 * Math.min(1f, prog)) * na)));
-                stroke.setStrokeWidth(W * 0.022f);
+                stroke.setStrokeWidth(W * 0.032f);
                 c.drawCircle(cx, cy, rr, stroke);
                 drawArrows(c, rr, n.dir, alpha(sc, (int) (255 * na)), t);
             }
@@ -2006,7 +2044,7 @@ public class BeatView extends View {
         float ca = (float) Math.cos(a), sa = (float) Math.sin(a);
         float hx = cx + ca * R * pHead, hy = cy + sa * R * pHead;
         float tx = cx + (float) Math.cos(at) * R * pTail, ty = cy + (float) Math.sin(at) * R * pTail;
-        float width = W * 0.07f * (0.5f + 0.5f * Math.min(1f, pHead));
+        float width = W * 0.095f * (0.5f + 0.5f * Math.min(1f, pHead));
         stroke.setStrokeWidth(width * 1.5f);
         stroke.setColor(alpha(col, (int) ((active ? 110 : 60) * na)));
         c.drawLine(hx, hy, tx, ty, stroke);
@@ -2016,7 +2054,7 @@ public class BeatView extends View {
         stroke.setStrokeWidth(width * 0.35f);
         stroke.setColor(alpha(Color.WHITE, (int) ((active ? 230 : 150) * na)));
         c.drawLine(hx, hy, tx, ty, stroke);
-        float size = W * 0.05f * (0.5f + 0.5f * Math.min(1f, pHead));
+        float size = W * 0.07f * (0.5f + 0.5f * Math.min(1f, pHead));
         glow(c, hx, hy, size * (active ? 3f : 2.2f), alpha(col, (int) ((active ? 200 : 120) * na)));
         p.setColor(alpha(Color.WHITE, (int) (255 * na)));
         c.drawCircle(hx, hy, size * 0.75f, p);
@@ -2040,7 +2078,7 @@ public class BeatView extends View {
             // 접선 방향
             float tx = (float) -Math.sin(a), ty = (float) Math.cos(a);
             int d = dir == 0 ? 1 : dir;
-            float s = W * 0.03f;
+            float s = W * 0.04f;
             path.reset();
             path.moveTo(x + tx * s * d, y + ty * s * d);
             path.lineTo(x - tx * s * 0.5f * d + (float) Math.cos(a) * s * 0.7f, y - ty * s * 0.5f * d + (float) Math.sin(a) * s * 0.7f);
