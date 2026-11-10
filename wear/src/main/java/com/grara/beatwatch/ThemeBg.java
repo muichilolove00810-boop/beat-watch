@@ -64,7 +64,8 @@ final class ThemeBg {
     private final RectF rect = new RectF();
     private final Path work = new Path();
     private final Path heart = new Path(), circuit = new Path(), flake = new Path(), ice = new Path(),
-            mountFar = new Path(), mountNear = new Path(), cloud = new Path(), arch = new Path(), scan = new Path();
+            mountFar = new Path(), mountNear = new Path(), cloud = new Path(), arch = new Path(), scan = new Path(),
+            iceTop = new Path();
     private final float[] trX = new float[32], trY = new float[32], trLen = new float[8];
     private Shader sky, hell;
     private float W, H, cx, cy, R, u, amt;
@@ -84,7 +85,7 @@ final class ThemeBg {
         R = ringR;
         u = w;
         sky = new LinearGradient(0, 0, 0, cy + u * 0.06f, Color.rgb(20, 6, 40), Color.rgb(80, 28, 58), Shader.TileMode.CLAMP);
-        hell = new RadialGradient(cx, H, u * 0.75f, Color.rgb(150, 22, 10), Color.TRANSPARENT, Shader.TileMode.CLAMP);
+        hell = new RadialGradient(cx, H * 0.85f, u * 0.85f, Color.rgb(150, 22, 10), Color.TRANSPARENT, Shader.TileMode.CLAMP);
 
         // 도트 하트 (7x6 픽셀, 가운데 기준, 픽셀 1 단위)
         heart.reset();
@@ -126,36 +127,21 @@ final class ThemeBg {
             }
         }
 
-        // 얼음 결정: 아래는 솟은 결정, 위는 고드름
-        ice.reset();
-        ice.moveTo(0, H);
-        for (int i = 0; i <= 14; i++) {
-            float x = W * i / 14f;
-            ice.lineTo(x - W / 28f, H - u * 0.02f);
-            ice.lineTo(x, H - u * (0.06f + 0.11f * hf(300 + i)));
-        }
-        ice.lineTo(W, H);
-        ice.close();
-        ice.moveTo(0, 0);
-        for (int i = 0; i <= 18; i++) {
-            float x = W * i / 18f;
-            ice.lineTo(x, u * 0.015f);
-            ice.lineTo(x + W / 36f, u * (0.04f + 0.08f * hf(400 + i)));
-        }
-        ice.lineTo(W, 0);
-        ice.close();
+        // 얼음 결정: 화면 원을 따라 휘어짐 (아래는 솟은 결정, 위는 고드름)
+        buildIce(ice, 40, 140, 12, 0.03f, 0.07f, 300);
+        buildIce(iceTop, 215, 325, 14, 0.02f, 0.05f, 400);
 
         // 8비트 산 (가로 2W 타일, 계단 모양)
-        buildMount(mountFar, u * 0.04f, 0.38f, 0.9f, 500);
-        buildMount(mountNear, u * 0.025f, 0.22f, 0.7f, 600);
+        buildMount(mountFar, u * 0.04f, 0.45f, 0.9f, 500);
+        buildMount(mountNear, u * 0.025f, 0.3f, 0.7f, 600);
 
         // 지옥의 문 아치
         arch.reset();
-        float aw = u * 0.3f;
+        float aw = u * 0.22f;
         arch.moveTo(cx - aw, H);
         arch.lineTo(cx - aw, cy - u * 0.02f);
-        arch.quadTo(cx - aw, cy - u * 0.3f, cx, cy - u * 0.4f);
-        arch.quadTo(cx + aw, cy - u * 0.3f, cx + aw, cy - u * 0.02f);
+        arch.quadTo(cx - aw, cy - u * 0.24f, cx, cy - u * 0.3f);
+        arch.quadTo(cx + aw, cy - u * 0.24f, cx + aw, cy - u * 0.02f);
         arch.lineTo(cx + aw, H);
 
         // 주사선
@@ -179,6 +165,34 @@ final class ThemeBg {
                 s = -1;
             }
         }
+    }
+
+    /** 원 가장자리(각도 a0~a1)를 따라 안쪽으로 솟은 결정. 골은 가장자리에서 0.04u 안쪽. */
+    private void buildIce(Path p, float a0, float a1, int n, float hMin, float hVar, int seed) {
+        p.reset();
+        float ro = u * 0.53f, rv = u * 0.46f;
+        p.moveTo(cx + cosd(a0) * ro, cy + sind(a0) * ro);
+        for (int i = 0; i <= n; i++) {
+            float a = a0 + (a1 - a0) * i / n;
+            p.lineTo(cx + cosd(a) * rv, cy + sind(a) * rv);
+            if (i < n) {
+                float am = a + (a1 - a0) / n * 0.5f, rt = rv - u * (hMin + hVar * hf(seed + i));
+                p.lineTo(cx + cosd(am) * rt, cy + sind(am) * rt);
+            }
+        }
+        for (int i = 8; i >= 0; i--) {
+            float a = a0 + (a1 - a0) * i / 8;
+            p.lineTo(cx + cosd(a) * ro, cy + sind(a) * ro);
+        }
+        p.close();
+    }
+
+    private static float cosd(float d) {
+        return (float) Math.cos(Math.toRadians(d));
+    }
+
+    private static float sind(float d) {
+        return (float) Math.sin(Math.toRadians(d));
     }
 
     private void buildMount(Path p, float b, float peakH, float slope, int seed) {
@@ -258,10 +272,11 @@ final class ThemeBg {
         long b0 = (long) Math.floor(beats);
         for (int k = 0; k < 4; k++) {
             float s = (k + fr) / 4f;
-            float al = 80 * (1 - s) * (0.5f + 0.5f * en);
+            float rr = u * (0.08f + 0.3f * s);
+            float al = 80 * (1 - s) * (0.5f + 0.5f * en) * Math.min(1f, (u * 0.38f - rr) / (u * 0.08f));
             line.setStrokeWidth(u * (0.004f + 0.007f * (1 - s)));
             line.setColor(((b0 - k) & 1) == 0 ? col(60, 200, 255, al) : col(255, 70, 200, al));
-            c.drawCircle(cx, cy, u * (0.08f + 0.5f * s), line);
+            c.drawCircle(cx, cy, rr, line);
         }
         for (int i = 0; i < 12; i++) {
             double a = Math.toRadians(i * 30 + t * 12);
@@ -310,14 +325,14 @@ final class ThemeBg {
 
     // 2 픽셀 하트: 가운데 큰 도트 하트가 박자에 뛰고, 작은 하트들이 떠오름
     private void pixel(Canvas c, float pulse, float t) {
-        drawPix(c, heart, cx, cy - u * 0.01f, u * 0.042f * (1 + 0.08f * pulse), col(200, 50, 110, 22 + 35 * pulse));
+        drawPix(c, heart, cx, cy - u * 0.01f, u * 0.065f * (1 + 0.08f * pulse), col(200, 50, 110, 50 + 50 * pulse));
         for (int i = 0; i < 9; i++) {
             float s = fr(hf(i * 7 + 2) + t * (0.035f + 0.03f * hf(i * 7 + 3)));
             float x = cx + (hf(i * 7 + 1) - 0.5f) * u * 0.85f + (float) Math.sin(t * 0.9f + i) * u * 0.03f;
             float y = H * 1.08f - s * H * 1.16f;
-            float px = u * (0.007f + 0.007f * hf(i * 7 + 4)) * (1 + 0.18f * pulse);
-            float al = 75 * Math.min(1f, Math.min(s * 5, (1 - s) * 5));
-            drawPix(c, heart, x, y, px, i % 3 == 0 ? col(255, 110, 160, al) : col(200, 60, 120, al));
+            float px = u * (0.012f + 0.008f * hf(i * 7 + 4)) * (1 + 0.18f * pulse);
+            float al = 120 * Math.min(1f, Math.min(s * 5, (1 - s) * 5));
+            drawPix(c, heart, x, y, px, col(255, 110, 160, al));
         }
     }
 
@@ -353,7 +368,7 @@ final class ThemeBg {
                 x = x1;
                 y = y1;
             }
-            fill.setColor(col(120, 255, 190, 80 + 120 * pulse));
+            fill.setColor(col(180, 255, 240, 60 + 90 * pulse));
             c.drawCircle(x, y, u * 0.008f, fill);
         }
     }
@@ -370,11 +385,11 @@ final class ThemeBg {
             c.drawLine(cx + ca * r0, cy + sa * r0, cx + ca * (r0 + len), cy + sa * (r0 + len), line);
         }
         line.setStrokeWidth(u * 0.006f);
-        line.setColor(col(130, 100, 255, 40 + 60 * pulse));
-        float g = u * 0.3f;
+        line.setColor(col(100, 190, 255, 40 + 60 * pulse));
+        float g = u * 0.24f;
         rect.set(cx - g, cy - g, cx + g, cy + g);
         for (int k = 0; k < 6; k++) c.drawArc(rect, t * 20 + k * 60, 38, false, line);
-        g = u * 0.2f;
+        g = u * 0.16f;
         rect.set(cx - g, cy - g, cx + g, cy + g);
         for (int k = 0; k < 6; k++) c.drawArc(rect, -t * 30 + k * 60 + 30, 30, false, line);
     }
@@ -384,52 +399,63 @@ final class ThemeBg {
         double b2 = beats / 2;
         int bi = (int) Math.floor(b2);
         float flash = (float) Math.exp(-(b2 - bi) * 2 * 4) * (0.5f + 0.5f * en);
+        work.reset(); // 구름을 한 Path로 모아 한 번에 칠함 (겹친 이음매 없음)
         for (int i = 0; i < 7; i++) {
             float x = cx + (i - 3) * u * 0.14f + (float) Math.sin(t * 0.3f + i) * u * 0.02f;
-            float y = u * 0.06f + hf(i) * u * 0.05f;
-            int k = (int) (40 * flash);
-            fill.setColor(col(40 + k, 40 + k, 60 + k, 90));
-            c.drawCircle(x, y, u * 0.12f + hf(i + 9) * u * 0.05f, fill);
+            float y = u * 0.03f + hf(i) * u * 0.05f;
+            work.addCircle(x, y, u * 0.12f + hf(i + 9) * u * 0.05f, Path.Direction.CW);
         }
+        int kf = (int) (40 * flash);
+        fill.setColor(col(40 + kf, 40 + kf, 60 + kf, 90));
+        c.drawPath(work, fill);
         if (flash < 0.02f) return;
         fill.setColor(col(140, 140, 220, 22 * flash));
         c.drawCircle(cx, cy, u * 0.5f, fill);
         float x = cx + (hf(bi * 5 + 1) < 0.5f ? -1 : 1) * u * (0.15f + 0.15f * hf(bi * 5 + 2));
         work.reset();
         work.moveTo(x, u * 0.05f);
-        for (int k = 1; k <= 7; k++) {
-            x += (hf(bi * 5 + 10 + k) - 0.5f) * u * 0.09f;
+        float bx = x, by = 0;
+        for (int k = 1; k <= 10; k++) {
+            x += (hf(bi * 5 + 10 + k) - 0.5f) * u * 0.14f;
             work.lineTo(x, u * 0.05f + k * u * 0.075f);
+            if (k == 4) {
+                bx = x;
+                by = u * 0.05f + k * u * 0.075f;
+            }
         }
+        float dir = hf(bi * 5 + 30) < 0.5f ? -1 : 1; // 곁가지
+        work.moveTo(bx, by);
+        work.lineTo(bx + dir * u * 0.07f, by + u * 0.06f);
+        work.lineTo(bx + dir * u * 0.1f, by + u * 0.13f);
         line.setStrokeWidth(u * 0.02f);
         line.setColor(col(150, 150, 255, 50 * flash));
         c.drawPath(work, line);
-        line.setStrokeWidth(u * 0.007f);
+        line.setStrokeWidth(u * 0.01f);
         line.setColor(col(230, 230, 255, 170 * flash));
         c.drawPath(work, line);
     }
 
-    // 6 글리치 스톰: 주사선 + 반 박자마다 RGB가 어긋나는 노이즈 띠
+    // 6 글리치 스톰: 주사선 + 1박자마다 빨강·흰색으로 어긋나는 노이즈 띠
     private void glitch(Canvas c, double beats, float en) {
         line.setStrokeWidth(u * 0.003f);
         line.setColor(col(100, 80, 160, 22));
         c.drawPath(scan, line);
-        int tick = (int) Math.floor(beats * 2);
-        float g = 0.35f + 0.65f * (float) Math.exp(-fr(beats * 2) * 3);
-        for (int k = 0; k < 6; k++) {
+        int tick = (int) Math.floor(beats); // 1박자마다만 바뀜 (광과민 배려)
+        float g = 0.35f + 0.65f * (float) Math.exp(-fr(beats) * 3);
+        for (int k = 0; k < 4; k++) {
             int s = tick * 13 + k * 7;
             float y = hf(s) * H, h = u * (0.01f + 0.04f * hf(s + 50));
             float x0 = hf(s + 150) * W * 0.5f, x1 = x0 + W * (0.3f + 0.7f * hf(s + 200));
             float d = (hf(s + 100) - 0.5f) * u * 0.1f * g + u * 0.008f;
-            float al = 50 * g * (0.5f + en);
+            float al = 30 * g * (0.5f + en);
             fill.setColor(col(200, 30, 70, al));
             c.drawRect(x0 + d, y, x1 + d, y + h, fill);
-            fill.setColor(col(30, 180, 210, al));
+            fill.setColor(col(200, 200, 230, al));
             c.drawRect(x0 - d, y, x1 - d, y + h, fill);
         }
         fill.setColor(col(220, 220, 255, 45 * g));
         float sz = u * 0.008f;
-        for (int k = 0; k < 24; k++) {
+        for (int k = 0; k < 14; k++) {
             int s = tick * 31 + k * 3 + 1000;
             float x = hf(s) * W, y = hf(s + 1) * H;
             c.drawRect(x, y, x + sz, y + sz, fill);
@@ -440,25 +466,25 @@ final class ThemeBg {
     private void hell(Canvas c, float pulse, float t) {
         fill.setShader(hell);
         fill.setColor(Color.BLACK);
-        fill.setAlpha((int) ((110 + 110 * pulse) * amt));
-        c.drawCircle(cx, H, u * 0.75f, fill);
+        fill.setAlpha(Math.min(255, (int) ((150 + 90 * pulse) * amt)));
+        c.drawCircle(cx, H * 0.85f, u * 0.85f, fill);
         fill.setShader(null);
         line.setStrokeWidth(u * 0.012f);
-        line.setColor(col(120, 28, 16, 70 + 40 * pulse));
+        line.setColor(col(200, 50, 30, 90 + 50 * pulse));
         c.drawPath(arch, line);
         for (int i = 0; i < 36; i++) {
             float s = fr(hf(i * 4 + 2) + t * (0.15f + 0.15f * hf(i * 4 + 3)));
             float x = cx + (hf(i * 4 + 1) - 0.5f) * u * 0.8f + (float) Math.sin(t * 2 + i) * u * 0.02f;
             float y = H * (1.02f - s * 0.95f);
             float r = u * (0.004f + 0.006f * hf(i * 4 + 4)) * (1 - s * 0.6f);
-            fill.setColor(s < 0.5f ? col(255, 140, 40, 130 * (1 - s)) : col(220, 60, 30, 130 * (1 - s)));
+            fill.setColor((i & 1) == 0 ? col(255, 90, 30, 130 * (1 - s)) : col(255, 200, 80, 130 * (1 - s)));
             c.drawCircle(x, y, r, fill);
         }
     }
 
     // 8 레이저 하우스: 위아래 4곳에서 좌우로 휘젓는 레이저 빔
     private static final int[] LASER_COL = {Color.rgb(60, 255, 120), Color.rgb(255, 60, 200),
-            Color.rgb(60, 200, 255), Color.rgb(255, 220, 60)};
+            Color.rgb(255, 60, 80), Color.rgb(230, 230, 255)};
 
     private void laser(Canvas c, float pulse, float t) {
         for (int s = 0; s < 4; s++) {
@@ -473,7 +499,7 @@ final class ThemeBg {
                 line.setColor(col(Color.red(lc), Color.green(lc), Color.blue(lc), 16 + 25 * pulse));
                 c.drawLine(sx, sy, ex, ey, line);
                 line.setStrokeWidth(u * 0.004f);
-                line.setColor(col(Color.red(lc), Color.green(lc), Color.blue(lc), 40 + 70 * pulse));
+                line.setColor(col(Color.red(lc), Color.green(lc), Color.blue(lc), 30 + 50 * pulse));
                 c.drawLine(sx, sy, ex, ey, line);
             }
         }
@@ -483,16 +509,24 @@ final class ThemeBg {
     private void highway(Canvas c, double beats) {
         float vy = cy - u * 0.12f;
         float sc = fr(beats * 0.5);
-        line.setStrokeWidth(u * 0.004f);
-        line.setColor(col(90, 90, 130, 60));
+        work.reset();
+        work.moveTo(cx, vy);
+        work.lineTo(cx - u * 0.6f, H);
+        work.lineTo(cx + u * 0.6f, H);
+        work.close();
+        fill.setColor(col(16, 16, 40, 200));
+        c.drawPath(work, fill);
+        line.setStrokeWidth(u * 0.006f);
+        line.setColor(col(90, 90, 130, 100));
         c.drawLine(cx, vy, cx - u * 0.6f, H, line);
         c.drawLine(cx, vy, cx + u * 0.6f, H, line);
         line.setColor(col(255, 150, 80, 45));
+        line.setStrokeWidth(u * 0.004f);
         c.drawLine(cx - u * 0.35f, vy, cx + u * 0.35f, vy, line);
         for (int k = 0; k < 6; k++) {
             float s = (k + sc) / 6f, s2 = Math.min(1f, s + 0.06f);
             line.setStrokeWidth(u * (0.004f + 0.02f * s));
-            line.setColor(col(200, 200, 160, 30 + 50 * s));
+            line.setColor(col(200, 200, 160, (30 + 50 * s) * (s < 0.45f ? 0.5f : 1f))); // 가운데(콤보 글자) 쪽은 흐리게
             c.drawLine(cx, vy + (H - vy) * s * s, cx, vy + (H - vy) * s2 * s2, line);
         }
         for (int k = 0; k < 5; k++) {
@@ -504,8 +538,8 @@ final class ThemeBg {
                 c.drawLine(x, y, x, vy + (H - vy) * p, line);
                 float lr = u * (0.004f + 0.018f * p);
                 fill.setColor(col(255, 170, 60, 15 + 35 * p));
-                c.drawCircle(x, y, lr * 3, fill);
-                fill.setColor(col(255, 190, 90, 60 + 140 * p));
+                c.drawCircle(x, y, lr * 2, fill);
+                fill.setColor(col(255, 190, 90, 40 + 90 * p));
                 c.drawCircle(x, y, lr, fill);
             }
         }
@@ -515,6 +549,8 @@ final class ThemeBg {
     private void ice(Canvas c, float pulse, float t) {
         fill.setColor(col(60, 120, 170, 45));
         c.drawPath(ice, fill);
+        fill.setColor(col(60, 120, 170, 30));
+        c.drawPath(iceTop, fill);
         for (int i = 0; i < 30; i++) {
             float x = hf(i * 5 + 1) * W + (float) Math.sin(t * 0.7f + i * 1.3f) * u * 0.03f;
             float y = fr(hf(i * 5 + 2) + t * (0.03f + 0.04f * hf(i * 5 + 3))) * H * 1.1f - u * 0.05f;
@@ -539,7 +575,7 @@ final class ThemeBg {
     // 11 8비트 모험: 도트 별 + 흘러가는 도트 구름 + 두 겹의 계단 산
     private void bit8(Canvas c, double beats, float t) {
         long b0 = (long) Math.floor(beats);
-        float sz = u * 0.01f;
+        float sz = u * 0.016f;
         for (int i = 0; i < 8; i++) {
             boolean on = ((b0 + i) & 1) == 0;
             fill.setColor(col(200, 200, 255, on ? 90 : 35));
@@ -549,13 +585,13 @@ final class ThemeBg {
         for (int i = 0; i < 3; i++) {
             float s = fr(hf(i + 820) + t * 0.02f * (1 + i * 0.3f));
             float x = W + u * 0.15f - s * (W + u * 0.3f), y = u * (0.17f + i * 0.09f);
-            drawPix(c, cloud, x, y, u * 0.016f, col(90, 90, 140, 60));
+            drawPix(c, cloud, x, y, u * 0.016f, col(90, 90, 140, 110));
         }
         float off = fr(t * 0.015f) * 2 * W;
-        fill.setColor(col(40, 40, 90, 130));
+        fill.setColor(col(60, 60, 140, 170));
         drawTile(c, mountFar, off);
         off = fr(t * 0.035f) * 2 * W;
-        fill.setColor(col(28, 70, 48, 160));
+        fill.setColor(col(40, 120, 70, 200));
         drawTile(c, mountNear, off);
     }
 
@@ -577,22 +613,22 @@ final class ThemeBg {
             work.moveTo(x, y);
             work.lineTo(x + u * 0.015f, y + u * 0.05f);
         }
-        line.setStrokeWidth(u * 0.003f);
-        line.setColor(col(110, 140, 200, 70));
+        line.setStrokeWidth(u * 0.0045f);
+        line.setColor(col(100, 160, 255, 90));
         c.drawPath(work, line);
         for (int w = 0; w < 2; w++) {
             float y0 = cy + (w == 0 ? -1 : 1) * u * 0.27f;
             float amp = u * 0.03f * (0.3f + 1.5f * pulse);
             work.reset();
-            for (int k = 0; k <= 24; k++) {
-                float x = W * k / 24f;
-                float env = (float) Math.sin(Math.PI * k / 24.0);
-                float y = y0 + (float) Math.sin(k * 0.8f + t * 3 + w * 2) * amp * env;
+            for (int k = 0; k <= 48; k++) {
+                float x = W * k / 48f;
+                float env = (float) Math.sin(Math.PI * k / 48.0);
+                float y = y0 + (float) Math.sin(k * 0.4f + t * 3 + w * 2) * amp * env;
                 if (k == 0) work.moveTo(x, y);
                 else work.lineTo(x, y);
             }
             line.setStrokeWidth(u * 0.005f);
-            line.setColor(col(90, 110, 255, 60 + 60 * pulse));
+            line.setColor(col(70, 140, 255, 60 + 60 * pulse));
             c.drawPath(work, line);
         }
     }
